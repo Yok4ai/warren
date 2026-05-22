@@ -19,6 +19,9 @@ pub struct FileTree {
     expanded: HashSet<PathBuf>,
     pub rows: Vec<Row>,
     pub selected: usize,
+    /// Index of the first visible row; we own this (rather than a List widget) so mouse clicks
+    /// can be mapped back to rows.
+    pub scroll: usize,
 }
 
 impl FileTree {
@@ -28,9 +31,24 @@ impl FileTree {
             expanded: HashSet::new(),
             rows: Vec::new(),
             selected: 0,
+            scroll: 0,
         };
         tree.rebuild();
         tree
+    }
+
+    /// Adjust `scroll` so the selected row is visible within `height` rows.
+    pub fn ensure_visible(&mut self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + height {
+            self.scroll = self.selected + 1 - height;
+        }
+        let max = self.rows.len().saturating_sub(height);
+        self.scroll = self.scroll.min(max);
     }
 
     /// Re-walk the filesystem into `rows`, descending into expanded directories only.

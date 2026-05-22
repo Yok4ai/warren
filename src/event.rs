@@ -20,8 +20,9 @@ pub enum AppEvent {
     Tick,
 }
 
-/// Redraw cadence (~30fps). Ticks are no-ops unless something marked the UI dirty.
-const TICK: Duration = Duration::from_millis(33);
+/// Redraw cadence (~60fps). Rendering happens only on a tick, and only when something marked
+/// the UI dirty — so bursts of input (key-repeat, mouse motion) coalesce into one frame.
+const TICK: Duration = Duration::from_millis(16);
 
 /// Spawn a blocking thread that reads terminal input and forwards it to the funnel.
 /// crossterm's `read()` is blocking, so it lives on its own OS thread rather than the runtime.

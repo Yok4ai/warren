@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use notify::RecommendedWatcher;
 use tokio::sync::mpsc;
 
@@ -74,18 +77,40 @@ impl App {
         event::spawn_ticks(tx.clone());
         self._watcher = watcher::spawn(&self.workspace, tx);
 
+        // Rendering is driven by the tick only: input/fs events mutate state and mark the UI
+        // dirty, and each tick paints at most one frame. This coalesces bursts so holding a key
+        // or flooding mouse motion can't pile up redraws.
         self.draw(terminal)?;
         while let Some(ev) = rx.recv().await {
-            self.handle(ev);
-            if self.should_quit {
-                break;
-            }
-            if self.needs_redraw {
-                self.draw(terminal)?;
-                self.needs_redraw = false;
+            match ev {
+                AppEvent::Tick => {
+                    self.on_tick();
+                    if self.needs_redraw {
+                        self.draw(terminal)?;
+                        self.needs_redraw = false;
+                    }
+                }
+                other => {
+                    self.handle(other);
+                    if self.should_quit {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Per-frame housekeeping before painting: apply any coalesced filesystem changes.
+    fn on_tick(&mut self) {
+        if self.tree_dirty {
+            self.tree_dirty = false;
+            self.tree.rebuild();
+            for path in std::mem::take(&mut self.changed_paths) {
+                self.editor.reload(&path);
+            }
+            self.needs_redraw = true;
+        }
     }
 
     fn draw(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -96,22 +121,119 @@ impl App {
     fn handle(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::Input(CtEvent::Key(key)) => self.on_key(key),
+            AppEvent::Input(CtEvent::Mouse(m)) => self.on_mouse(m),
             AppEvent::Input(CtEvent::Resize(..)) => self.needs_redraw = true,
             AppEvent::Input(_) => {}
             AppEvent::FsChanged(paths) => {
                 self.tree_dirty = true;
                 self.changed_paths.extend(paths);
             }
-            AppEvent::Tick => {
-                if self.tree_dirty {
-                    self.tree_dirty = false;
-                    self.tree.rebuild();
-                    // Reload only the open files that actually changed on disk.
-                    for path in std::mem::take(&mut self.changed_paths) {
-                        self.editor.reload(&path);
+            AppEvent::Tick => {} // handled in run loop's render step
+        }
+    }
+
+    fn on_mouse(&mut self, m: MouseEvent) {
+        let in_sidebar = self.sidebar_visible && m.column < ui::SIDEBAR_WIDTH;
+        match m.kind {
+            MouseEventKind::ScrollDown => {
+                if in_sidebar {
+                    self.tree.move_down();
+                } else {
+                    self.editor.scroll_down(3);
+                }
+                self.needs_redraw = true;
+            }
+            MouseEventKind::ScrollUp => {
+                if in_sidebar {
+                    self.tree.move_up();
+                } else {
+                    self.editor.scroll_up(3);
+                }
+                self.needs_redraw = true;
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if in_sidebar {
+                    self.focus = Focus::Sidebar;
+                    // Map the click row to a tree row using the offset from the last frame.
+                    // Row 0 is the top border, so the first item is at row 1.
+                    if m.row >= 1 {
+                        let idx = self.tree.scroll + (m.row as usize - 1);
+                        if idx < self.tree.rows.len() {
+                            self.tree.selected = idx;
+                            self.activate_selected();
+                        }
                     }
+                } else {
+                    self.focus = Focus::Editor;
+                    if m.row == self.editor.tabbar_row {
+                        // Click on the tab bar switches tabs.
+                        if let Some(&(_, _, idx)) = self
+                            .editor
+                            .tab_hitboxes
+                            .iter()
+                            .find(|(s, e, _)| m.column >= *s && m.column < *e)
+                        {
+                            self.editor.active = idx;
+                            self.editor.clear_selection();
+                        }
+                    } else if let Some((line, col)) = self.editor_coords(&m) {
+                        // Begin a text selection in the editor content.
+                        self.editor.start_selection(line, col);
+                    } else {
+                        self.editor.clear_selection();
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((line, col)) = self.editor_coords(&m) {
+                    self.editor.update_selection(line, col);
                     self.needs_redraw = true;
                 }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(text) = self.editor.selected_text() {
+                    let n = text.chars().count();
+                    copy_to_clipboard(&text);
+                    self.status = format!("copied {n} chars");
+                } else {
+                    self.editor.clear_selection();
+                }
+                self.needs_redraw = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Map a mouse position to `(line, column)` in the active buffer, or `None` if it's outside
+    /// the editor content area.
+    fn editor_coords(&self, m: &MouseEvent) -> Option<(usize, usize)> {
+        let ca = self.editor.content_area;
+        if ca.width == 0
+            || ca.height == 0
+            || m.column < ca.x
+            || m.column >= ca.x + ca.width
+            || m.row < ca.y
+            || m.row >= ca.y + ca.height
+        {
+            return None;
+        }
+        let buf = self.editor.active_buffer()?;
+        let line = (buf.scroll + (m.row - ca.y) as usize).min(buf.line_count().saturating_sub(1));
+        let col = ((m.column - ca.x) as usize).min(buf.line_text(line).chars().count());
+        Some((line, col))
+    }
+
+    /// Open the selected file, or expand/collapse the selected directory (shared by the
+    /// Enter key and mouse clicks).
+    fn activate_selected(&mut self) {
+        if let Some(path) = self.tree.activate() {
+            match self.editor.open(&path) {
+                Ok(()) => {
+                    self.focus = Focus::Editor;
+                    self.status = path.display().to_string();
+                }
+                Err(e) => self.status = format!("error: {e}"),
             }
         }
     }
@@ -165,17 +287,7 @@ impl App {
             KeyCode::Down => self.tree.move_down(),
             KeyCode::Right => self.tree.expand(),
             KeyCode::Left => self.tree.collapse(),
-            KeyCode::Enter => {
-                if let Some(path) = self.tree.activate() {
-                    match self.editor.open(&path) {
-                        Ok(()) => {
-                            self.focus = Focus::Editor;
-                            self.status = path.display().to_string();
-                        }
-                        Err(e) => self.status = format!("error: {e}"),
-                    }
-                }
-            }
+            KeyCode::Enter => self.activate_selected(),
             _ => {}
         }
     }
@@ -183,6 +295,15 @@ impl App {
     fn handle_editor(&mut self, key: KeyEvent) {
         let km = &self.config.keymap;
         let (c, m) = (key.code, key.modifiers);
+        // Ctrl+C copies the current selection (if any).
+        if c == KeyCode::Char('c') && m.contains(KeyModifiers::CONTROL) {
+            if let Some(text) = self.editor.selected_text() {
+                let n = text.chars().count();
+                copy_to_clipboard(&text);
+                self.status = format!("copied {n} chars");
+            }
+            return;
+        }
         if km.next_tab.matches(c, m) {
             self.editor.next_tab();
         } else if km.prev_tab.matches(c, m) {
@@ -201,4 +322,16 @@ impl App {
             }
         }
     }
+}
+
+/// Copy text to the system clipboard via the OSC 52 terminal escape. Works in kitty (and most
+/// modern terminals), needs no clipboard daemon, and survives over SSH.
+fn copy_to_clipboard(text: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let seq = format!("\x1b]52;c;{encoded}\x07");
+    let mut out = std::io::stdout();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
 }

@@ -4,9 +4,32 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use crate::highlight;
+
+/// A text selection in buffer coordinates `(line, column)`, where column is a char index.
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+}
+
+impl Selection {
+    /// `(start, end)` ordered so start precedes end in document order.
+    pub fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+}
 
 /// One open file.
 pub struct Buffer {
@@ -37,6 +60,14 @@ impl Buffer {
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
+
+    /// Plain text of line `i`, reconstructed from its highlighted spans.
+    pub fn line_text(&self, i: usize) -> String {
+        self.lines
+            .get(i)
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// The collection of open tabs.
@@ -46,11 +77,20 @@ pub struct Editor {
     pub active: usize,
     /// Last rendered content height, used to clamp scrolling.
     pub viewport: usize,
+    /// Clickable tab regions from the last frame: (x_start, x_end_exclusive, tab_index).
+    pub tab_hitboxes: Vec<(u16, u16, usize)>,
+    /// Screen row of the tab bar from the last frame, for click mapping.
+    pub tabbar_row: u16,
+    /// Editor content area (excluding border/tabs) from the last frame, for mouse mapping.
+    pub content_area: Rect,
+    /// Active text selection, if any.
+    pub selection: Option<Selection>,
 }
 
 impl Editor {
     /// Open a file, or switch to it if already open. Returns an error message on failure.
     pub fn open(&mut self, path: &Path) -> Result<()> {
+        self.selection = None;
         if let Some(i) = self.tabs.iter().position(|b| b.path == path) {
             self.active = i;
             return Ok(());
@@ -61,6 +101,44 @@ impl Editor {
         Ok(())
     }
 
+    pub fn start_selection(&mut self, line: usize, col: usize) {
+        self.selection = Some(Selection {
+            anchor: (line, col),
+            cursor: (line, col),
+        });
+    }
+
+    pub fn update_selection(&mut self, line: usize, col: usize) {
+        if let Some(s) = &mut self.selection {
+            s.cursor = (line, col);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// The selected text, or `None` if there is no (non-empty) selection.
+    pub fn selected_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        if sel.is_empty() {
+            return None;
+        }
+        let buf = self.active_buffer()?;
+        let ((sl, sc), (el, ec)) = sel.normalized();
+        let mut out = String::new();
+        for li in sl..=el.min(buf.line_count().saturating_sub(1)) {
+            let chars: Vec<char> = buf.line_text(li).chars().collect();
+            let start = if li == sl { sc.min(chars.len()) } else { 0 };
+            let end = if li == el { ec.min(chars.len()) } else { chars.len() };
+            out.extend(&chars[start..end.max(start)]);
+            if li != el {
+                out.push('\n');
+            }
+        }
+        Some(out)
+    }
+
     pub fn active_buffer(&self) -> Option<&Buffer> {
         self.tabs.get(self.active)
     }
@@ -68,12 +146,14 @@ impl Editor {
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
+            self.selection = None;
         }
     }
 
     pub fn prev_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            self.selection = None;
         }
     }
 
@@ -81,6 +161,7 @@ impl Editor {
         if self.tabs.is_empty() {
             return;
         }
+        self.selection = None;
         self.tabs.remove(self.active);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);

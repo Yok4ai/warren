@@ -10,6 +10,7 @@ pub struct Theme {
     pub border: Color,
     pub status_bg: Color,
     pub status_fg: Color,
+    pub sel_bg: Color,
 }
 
 pub const DARK: Theme = Theme {
@@ -19,4 +20,5 @@ pub const DARK: Theme = Theme {
     border: Color::Rgb(0x3b, 0x42, 0x61),
     status_bg: Color::Rgb(0x1f, 0x23, 0x35),
     status_fg: Color::Rgb(0xa9, 0xb1, 0xd6),
+    sel_bg: Color::Rgb(0x33, 0x46, 0x7c),
 };
