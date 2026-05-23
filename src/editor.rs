@@ -4,13 +4,49 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use ropey::Rope;
 use syntect::parsing::SyntaxReference;
+use tokio::sync::mpsc::UnboundedSender;
 
+use crate::event::AppEvent;
 use crate::highlight::{self, LineState};
+
+/// File extensions opened as images rather than text.
+pub fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tiff" | "tif" | "qoi")
+    )
+}
+
+fn decode_image_file(path: &Path) -> Option<image::DynamicImage> {
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()
+}
+
+fn decode_image_bytes(data: &[u8]) -> Option<image::DynamicImage> {
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()
+}
+
+/// Download an image over HTTP(S) with a timeout. Returns the raw bytes (capped at 20 MB).
+fn fetch_url(url: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?;
+    let mut buf = Vec::new();
+    resp.into_reader().take(20_000_000).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
 
 /// A text selection in buffer coordinates `(line, column)`, where column is a char index.
 #[derive(Clone, Copy)]
@@ -51,6 +87,24 @@ pub struct DiffRow {
     pub new: Option<usize>,
 }
 
+/// An image embedded in a markdown preview: a reserved band of rows plus its (lazily loaded)
+/// render protocol. `proto` is `None` until the image is decoded (and stays `None` if it fails).
+pub struct PreviewImage {
+    pub line: usize,
+    pub height: u16,
+    pub source: String,
+    pub proto: Option<StatefulProtocol>,
+    /// True once loading has been kicked off (so we don't request it every frame).
+    pub requested: bool,
+}
+
+/// Cached markdown preview render at a particular width.
+struct PreviewRender {
+    width: usize,
+    lines: Vec<Line<'static>>,
+    images: Vec<PreviewImage>,
+}
+
 /// One open file.
 pub struct Buffer {
     pub path: PathBuf,
@@ -81,6 +135,12 @@ pub struct Buffer {
     pub is_diff: bool,
     /// For a full-file inline diff, per-row kind + old/new line numbers (parallel to `lines`).
     pub diff_rows: Option<Vec<DiffRow>>,
+    /// Markdown preview toggle (only meaningful for .md buffers).
+    pub preview: bool,
+    /// Cached rendered markdown preview; invalidated on edit, re-rendered on width change.
+    preview_cache: Option<PreviewRender>,
+    /// For an image buffer, the resize-aware render protocol (kitty/sixel/iTerm2/half-blocks).
+    pub image: Option<StatefulProtocol>,
     /// Undo/redo snapshots of `(rope, cursor)`. Rope clones are cheap (structural sharing).
     undo: Vec<(Rope, (usize, usize))>,
     redo: Vec<(Rope, (usize, usize))>,
@@ -115,6 +175,9 @@ impl Buffer {
             readonly: false,
             is_diff: false,
             diff_rows: None,
+            preview: false,
+            preview_cache: None,
+            image: None,
             undo: Vec::new(),
             redo: Vec::new(),
         })
@@ -162,6 +225,9 @@ impl Buffer {
             readonly: true,
             is_diff,
             diff_rows: None,
+            preview: false,
+            preview_cache: None,
+            image: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -190,9 +256,50 @@ impl Buffer {
             readonly: true,
             is_diff: true,
             diff_rows: Some(rows),
+            preview: false,
+            preview_cache: None,
+            image: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    /// A read-only image buffer rendered via the terminal graphics protocol. The text rope is an
+    /// empty placeholder; `image` carries the renderable protocol state.
+    fn from_image(path: &Path, picker: &Picker) -> Result<Self> {
+        let img = image::ImageReader::open(path)
+            .with_context(|| format!("opening {}", path.display()))?
+            .with_guessed_format()
+            .with_context(|| format!("reading {}", path.display()))?
+            .decode()
+            .map_err(|e| anyhow!("decoding {}: {e}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let syntax = highlight::syntax_for(path);
+        Ok(Self {
+            lines: vec![Line::raw("")],
+            path: path.to_path_buf(),
+            name,
+            rope: Rope::new(),
+            syntax,
+            hl_states: Vec::new(),
+            dirty_from: None,
+            cursor: (0, 0),
+            scroll: 0,
+            hscroll: 0,
+            modified: false,
+            last_edit: Instant::now(),
+            readonly: true,
+            is_diff: false,
+            diff_rows: None,
+            preview: false,
+            preview_cache: None,
+            image: Some(picker.new_resize_protocol(img)),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        })
     }
 
     pub fn line_count(&self) -> usize {
@@ -235,12 +342,83 @@ impl Buffer {
         self.readonly
     }
 
+    /// Whether this buffer is a Markdown file (so preview is meaningful).
+    pub fn is_markdown(&self) -> bool {
+        matches!(
+            self.path.extension().and_then(|e| e.to_str()),
+            Some("md") | Some("markdown") | Some("mdown") | Some("mkd")
+        )
+    }
+
+    /// Toggle the rendered-markdown preview. Returns the new state (false for non-markdown).
+    pub fn toggle_preview(&mut self) -> bool {
+        if self.is_markdown() {
+            self.preview = !self.preview;
+        }
+        self.preview
+    }
+
+    /// (Re)render the markdown preview for `width` if needed, preserving already-loaded images.
+    pub fn ensure_preview(&mut self, width: usize) {
+        if self.preview_cache.as_ref().map(|c| c.width) == Some(width) {
+            return;
+        }
+        let (lines, marks) = crate::markdown::render(&self.rope.to_string(), width);
+        // Carry over decoded protocols for images whose source is unchanged.
+        let mut old: std::collections::HashMap<String, Option<StatefulProtocol>> = self
+            .preview_cache
+            .take()
+            .map(|c| {
+                c.images
+                    .into_iter()
+                    .filter(|i| i.proto.is_some())
+                    .map(|i| (i.source, i.proto))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let images = marks
+            .into_iter()
+            .map(|m| {
+                let proto = old.remove(&m.source).flatten();
+                PreviewImage {
+                    requested: proto.is_some(),
+                    proto,
+                    line: m.line,
+                    height: m.height,
+                    source: m.source,
+                }
+            })
+            .collect();
+        self.preview_cache = Some(PreviewRender {
+            width,
+            lines,
+            images,
+        });
+    }
+
+    pub fn preview_lines(&self) -> &[Line<'static>] {
+        self.preview_cache.as_ref().map(|c| &c.lines[..]).unwrap_or(&[])
+    }
+
+    pub fn preview_images_mut(&mut self) -> &mut [PreviewImage] {
+        self.preview_cache
+            .as_mut()
+            .map(|c| &mut c.images[..])
+            .unwrap_or(&mut [])
+    }
+
+    /// The directory the buffer's file lives in (for resolving relative image paths).
+    pub fn dir(&self) -> PathBuf {
+        self.path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+    }
+
     /// Mark the buffer modified and record the earliest line that changed (for incremental
     /// re-highlighting).
     fn mark_dirty(&mut self, line: usize) {
         self.modified = true;
         self.last_edit = Instant::now();
         self.dirty_from = Some(self.dirty_from.map_or(line, |d| d.min(line)));
+        self.preview_cache = None;
     }
 
     /// Snapshot the current state onto the undo stack before a mutation (clears redo).
@@ -538,20 +716,85 @@ pub struct Editor {
     pub scrollbar_col: Option<u16>,
     /// Active text selection, if any.
     pub selection: Option<Selection>,
+    /// Terminal graphics picker (font size + protocol), used to open image files.
+    pub picker: Option<Picker>,
 }
 
 impl Editor {
-    /// Open a file, or switch to it if already open. Returns an error message on failure.
+    /// Open a file, or switch to it if already open. Image files open as image buffers (rendered
+    /// via the terminal graphics protocol); everything else opens as editable text.
     pub fn open(&mut self, path: &Path) -> Result<()> {
         self.selection = None;
         if let Some(i) = self.tabs.iter().position(|b| b.path == path) {
             self.active = i;
             return Ok(());
         }
-        let buf = Buffer::from_path(path)?;
+        let buf = if is_image_path(path) {
+            let picker = self
+                .picker
+                .as_ref()
+                .ok_or_else(|| anyhow!("image rendering is unavailable"))?;
+            Buffer::from_image(path, picker)?
+        } else {
+            Buffer::from_path(path)?
+        };
         self.tabs.push(buf);
         self.active = self.tabs.len() - 1;
         Ok(())
+    }
+
+    /// Decode any not-yet-loaded images in the active markdown preview. Local files are decoded
+    /// immediately; remote URLs are fetched on a background thread that posts `ImageLoaded`.
+    pub fn load_preview_images(&mut self, tx: &UnboundedSender<AppEvent>) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let idx = self.active;
+        let Some(buf) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if !(buf.preview && buf.is_markdown()) {
+            return;
+        }
+        let (dir, bpath) = (buf.dir(), buf.path.clone());
+        for img in buf.preview_images_mut() {
+            if img.requested {
+                continue;
+            }
+            img.requested = true;
+            let src = img.source.clone();
+            if src.starts_with("http://") || src.starts_with("https://") {
+                let (tx, bp) = (tx.clone(), bpath.clone());
+                std::thread::spawn(move || {
+                    if let Some(data) = fetch_url(&src) {
+                        let _ = tx.send(AppEvent::ImageLoaded {
+                            buffer: bp,
+                            source: src,
+                            data,
+                        });
+                    }
+                });
+            } else if let Some(im) = decode_image_file(&dir.join(&src)) {
+                img.proto = Some(picker.new_resize_protocol(im));
+            }
+        }
+    }
+
+    /// Attach a downloaded remote image (raw bytes) to its preview slot.
+    pub fn set_loaded_image(&mut self, buffer: &Path, source: &str, data: &[u8]) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let Some(buf) = self.tabs.iter_mut().find(|b| b.path == buffer) else {
+            return;
+        };
+        let Some(im) = decode_image_bytes(data) else {
+            return;
+        };
+        let proto = picker.new_resize_protocol(im);
+        if let Some(slot) = buf.preview_images_mut().iter_mut().find(|i| i.source == source) {
+            slot.proto = Some(proto);
+        }
     }
 
     /// Open (or replace) a read-only tab showing in-memory text such as a diff.

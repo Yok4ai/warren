@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use git2::{DiffFormat, DiffOptions, Oid, Repository, Sort, Status, StatusOptions};
+use git2::{DiffFormat, Oid, Repository, Sort, Status, StatusOptions};
 
 /// A changed file in the working tree / index.
 pub struct Change {
@@ -107,24 +107,32 @@ impl Git {
         out
     }
 
-    /// Unified diff of a working-tree file against HEAD (or the index for new files).
-    pub fn file_diff(&self, path: &str) -> String {
-        let head_tree = self
-            .repo
+    /// Contents of `path` in the HEAD tree (empty if absent, e.g. a newly added file).
+    pub fn head_file(&self, path: &str) -> String {
+        self.repo
             .head()
             .ok()
-            .and_then(|h| h.peel_to_tree().ok());
-        let mut opts = DiffOptions::new();
-        opts.pathspec(path)
-            .include_untracked(true)
-            .recurse_untracked_dirs(true);
-        let diff = self
-            .repo
-            .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts));
-        match diff {
-            Ok(diff) => diff_to_string(&diff),
-            Err(e) => format!("(diff unavailable: {e})"),
-        }
+            .and_then(|h| h.peel_to_tree().ok())
+            .and_then(|tree| tree.get_path(Path::new(path)).ok())
+            .and_then(|entry| self.repo.find_blob(entry.id()).ok())
+            .map(|blob| String::from_utf8_lossy(blob.content()).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// `(old, new)` contents of `path` for a commit: the parent's version vs the commit's version.
+    pub fn commit_file_versions(&self, oid: Oid, path: &str) -> (String, String) {
+        let blob_at = |tree: Option<git2::Tree>| -> String {
+            tree.and_then(|t| t.get_path(Path::new(path)).ok())
+                .and_then(|e| self.repo.find_blob(e.id()).ok())
+                .map(|b| String::from_utf8_lossy(b.content()).into_owned())
+                .unwrap_or_default()
+        };
+        let Ok(commit) = self.repo.find_commit(oid) else {
+            return (String::new(), String::new());
+        };
+        let new = blob_at(commit.tree().ok());
+        let old = blob_at(commit.parent(0).ok().and_then(|p| p.tree().ok()));
+        (old, new)
     }
 
     /// Header (hash/author/date) plus the full message and patch for a commit (like `git show`).
@@ -183,24 +191,6 @@ impl Git {
                 (path, code)
             })
             .collect()
-    }
-
-    /// Unified diff of a single file within a commit (vs its first parent).
-    pub fn commit_file_diff(&self, oid: Oid, path: &str) -> String {
-        let Ok(commit) = self.repo.find_commit(oid) else {
-            return String::new();
-        };
-        let tree = commit.tree().ok();
-        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
-        let mut opts = DiffOptions::new();
-        opts.pathspec(path);
-        match self
-            .repo
-            .diff_tree_to_tree(parent_tree.as_ref(), tree.as_ref(), Some(&mut opts))
-        {
-            Ok(diff) => diff_to_string(&diff),
-            Err(e) => format!("(diff unavailable: {e})"),
-        }
     }
 
     /// Stage a path (add, or record a deletion).

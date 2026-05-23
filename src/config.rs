@@ -118,6 +118,7 @@ pub struct Keymap {
     pub toggle_scrollbar: KeyChord,
     pub select_all: KeyChord,
     pub toggle_autosave: KeyChord,
+    pub toggle_preview: KeyChord,
     pub toggle_panel: KeyChord,
     pub help: KeyChord,
 }
@@ -147,6 +148,7 @@ impl Default for Keymap {
             toggle_scrollbar: KeyChord::new(Char('s'), KeyModifiers::ALT),
             select_all: KeyChord::new(Char('a'), ctrl),
             toggle_autosave: KeyChord::new(Char('a'), KeyModifiers::ALT),
+            toggle_preview: KeyChord::new(Char('m'), KeyModifiers::ALT),
             toggle_panel: KeyChord::new(Char('`'), ctrl),
             help: KeyChord::new(F(1), KeyModifiers::NONE),
         }
@@ -173,6 +175,7 @@ impl Keymap {
             ("Source control", self.toggle_scm),
             ("Toggle scrollbar", self.toggle_scrollbar),
             ("Toggle auto-save", self.toggle_autosave),
+            ("Toggle markdown preview", self.toggle_preview),
             ("Command palette", self.command_palette),
             ("New terminal", self.new_terminal),
             ("Toggle terminal panel", self.toggle_panel),
@@ -208,6 +211,7 @@ impl Keymap {
                 "toggle_scrollbar" => self.toggle_scrollbar = chord,
                 "select_all" => self.select_all = chord,
                 "toggle_autosave" => self.toggle_autosave = chord,
+                "toggle_preview" => self.toggle_preview = chord,
                 "toggle_panel" => self.toggle_panel = chord,
                 "help" => self.help = chord,
                 _ => {}
@@ -263,6 +267,7 @@ new_file = \"ctrl+n\"
 toggle_scrollbar = \"alt+s\"
 select_all = \"ctrl+a\"
 toggle_autosave = \"alt+a\"
+toggle_preview = \"alt+m\"
 toggle_panel = \"ctrl+`\"
 help = \"f1\"
 

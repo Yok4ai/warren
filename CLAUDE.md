@@ -78,7 +78,7 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 `ctrl+q` quit · `ctrl+p` palette · `ctrl+b` toggle sidebar · `ctrl+g` source control
 · `alt+e` toggle editor · `ctrl+w` cycle focus
 · `ctrl+n` new file · `ctrl+s` save · `ctrl+x` close tab · `ctrl+pageup/pagedown` prev/next tab
-· `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `f1` keybindings overlay.
+· `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `alt+m` toggle markdown preview · `f1` keybindings overlay.
 Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run
 `claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
 Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel
@@ -92,8 +92,12 @@ click-to-place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c`
 paste (in-app clipboard + OSC52), `ctrl+z`/`ctrl+y` undo/redo, `ctrl+f` find (live, n/total,
 ↵/↑ next/prev).
 
+- `markdown.rs` — renders Markdown to styled ratatui lines for the editor's preview (`alt+m`):
+  headings + section rules, tables (box-drawing), code blocks, lists, quotes, and image slots.
+  Inline images (local + remote via `ureq`) are decoded with the `image` crate and overlaid with
+  `ratatui-image` (kitty/sixel/halfblock); image *files* open directly the same way.
+
 ## Deferred (future)
 
-Custom inline accept/reject diff by impersonating Claude Code's IDE server (WebSocket MCP via
-`~/.claude/ide/<pid>.lock`), multiple terminals, workspace tabs, markdown preview, GitHub auth,
-undo/redo, horizontal scroll.
+Workspace tabs, GitHub auth (push/pull needs TLS), side-by-side diffs, full ncurses-app fidelity
+in the embedded terminal (btop/vim shear — the `vt100` crate's emulation is incomplete).

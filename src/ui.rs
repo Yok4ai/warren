@@ -10,6 +10,8 @@ use crate::palette::Palette;
 use crate::prompt::Prompt;
 use ratatui::Frame;
 
+use ratatui_image::StatefulImage;
+
 use crate::app::{App, Focus, ScmItem, SidebarMode};
 use crate::editor::DiffKind;
 use crate::find::Search;
@@ -680,6 +682,26 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     app.editor.tabbar_row = tabbar.y;
     frame.render_widget(Paragraph::new(Line::from(spans)), tabbar);
 
+    // Image buffers render via the terminal graphics protocol (kitty/sixel/iTerm2/half-blocks).
+    if app.editor.active_buffer().map(|b| b.image.is_some()).unwrap_or(false) {
+        app.editor.viewport = content.height as usize;
+        if let Some(proto) = app.editor.active_buffer_mut().and_then(|b| b.image.as_mut()) {
+            frame.render_stateful_widget(StatefulImage::default(), content, proto);
+        }
+        return;
+    }
+
+    // Markdown preview replaces the source rendering entirely (read-only, no gutter/cursor).
+    if app
+        .editor
+        .active_buffer()
+        .map(|b| b.preview && b.is_markdown())
+        .unwrap_or(false)
+    {
+        draw_markdown_preview(frame, app, content);
+        return;
+    }
+
     app.editor.viewport = content.height as usize;
     let (total, scroll, cursor_line) = app
         .editor
@@ -883,6 +905,56 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
 /// A custom vertical scrollbar in the rightmost column of `area`. The thumb is sized to the
 /// visible fraction and sits flush at the bottom when scrolled to the end (unlike ratatui's
 /// Scrollbar, which stops short).
+/// Render the rendered-Markdown preview: wrapped styled lines + overlaid images, scrollable.
+fn draw_markdown_preview(frame: &mut Frame, app: &mut App, content: Rect) {
+    app.editor.viewport = content.height as usize;
+    let h = content.height as usize;
+    // Reserve a column for the scrollbar when scrollbars are enabled, so the wrap width is stable.
+    let text_w = content.width.saturating_sub(u16::from(app.show_scrollbar)).max(1);
+    let area = Rect::new(content.x, content.y, text_w, content.height);
+    app.editor.content_area = area;
+
+    if let Some(b) = app.editor.active_buffer_mut() {
+        b.ensure_preview(text_w as usize);
+    }
+    if let Some(tx) = app.tx.clone() {
+        app.editor.load_preview_images(&tx);
+    }
+
+    let (total, scroll) = {
+        let Some(buf) = app.editor.active_buffer_mut() else {
+            return;
+        };
+        let total = buf.preview_lines().len();
+        buf.scroll = buf.scroll.min(total.saturating_sub(h));
+        let scroll = buf.scroll;
+        let start = scroll.min(total.saturating_sub(1));
+        let end = (start + h).min(total);
+        let visible: Vec<Line> = buf.preview_lines()[start..end].to_vec();
+        frame.render_widget(Paragraph::new(visible), area);
+
+        // Overlay images whose reserved band fits entirely in the viewport (clipping a graphics
+        // protocol mid-scroll would distort it, so partially-scrolled images stay blank).
+        for img in buf.preview_images_mut() {
+            let band = img.height as usize;
+            if img.line >= start && img.line + band <= end {
+                if let Some(proto) = img.proto.as_mut() {
+                    let y = content.y + (img.line - start) as u16;
+                    let rect = Rect::new(area.x, y, area.width, img.height);
+                    frame.render_stateful_widget(StatefulImage::default(), rect, proto);
+                }
+            }
+        }
+        (total, scroll)
+    };
+
+    let show_sb = app.show_scrollbar && total > h;
+    app.editor.scrollbar_col = show_sb.then(|| content.x + content.width - 1);
+    if show_sb {
+        draw_scrollbar(frame, content, total, scroll);
+    }
+}
+
 fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, scroll: usize) {
     let track = area.height as usize;
     if track == 0 || total == 0 {

@@ -169,7 +169,7 @@ pub struct App {
     /// A diff Claude proposed, awaiting accept/reject.
     pending_diff: Option<PendingDiff>,
     /// Funnel sender, kept so panes spawned later can push events.
-    tx: Option<UnboundedSender<AppEvent>>,
+    pub(crate) tx: Option<UnboundedSender<AppEvent>>,
     pub status: String,
     should_quit: bool,
     needs_redraw: bool,
@@ -182,7 +182,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, picker: Option<ratatui_image::picker::Picker>) -> Self {
         // Optional folder argument, else the current directory.
         let workspace = std::env::args()
             .nth(1)
@@ -198,11 +198,15 @@ impl App {
             crate::theme::set_by_name(t);
         }
         let solid_bg = config.solid_bg;
+        let editor = Editor {
+            picker,
+            ..Editor::default()
+        };
         Self {
             config,
             workspace,
             tree,
-            editor: Editor::default(),
+            editor,
             focus: Focus::Sidebar,
             sidebar_visible: true,
             sidebar_mode: SidebarMode::Explorer,
@@ -362,6 +366,14 @@ impl App {
                     let _ = pd.reply.send(DiffDecision::Reject);
                 }
                 self.close_diff_tab();
+                self.needs_redraw = true;
+            }
+            AppEvent::ImageLoaded {
+                buffer,
+                source,
+                data,
+            } => {
+                self.editor.set_loaded_image(&buffer, &source, &data);
                 self.needs_redraw = true;
             }
             AppEvent::PtyChanged => self.needs_redraw = true,
@@ -1021,6 +1033,8 @@ impl App {
             } else {
                 "auto-save: off".into()
             };
+        } else if km.toggle_preview.matches(c, m) {
+            self.toggle_preview();
         } else if km.help.matches(c, m) {
             self.show_help = true;
         } else if km.command_palette.matches(c, m) {
@@ -1429,6 +1443,7 @@ impl App {
                     "auto-save: off".into()
                 };
             }
+            Command::TogglePreview => self.toggle_preview(),
             Command::ToggleSolidBg => {
                 self.solid_bg = !self.solid_bg;
                 self.status = if self.solid_bg {
@@ -1452,25 +1467,14 @@ impl App {
         }
     }
 
-    /// Show a proposed diff (old file on disk vs Claude's new contents) and await accept/reject.
-    fn open_diff(
-        &mut self,
-        path: String,
-        new_contents: String,
-        tab_name: String,
-        reply: oneshot::Sender<DiffDecision>,
-    ) {
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
-        let name = Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(tab_name);
-        // Full-file inline diff: every line of the new file, with removed old lines interleaved
-        // where they were. Rows carry real old/new line numbers for a VS Code-style dual gutter.
-        let diff = similar::TextDiff::from_lines(&old, &new_contents);
+    /// Build a full-file inline diff: every line of `new`, with removed `old` lines interleaved
+    /// where they were. Returns the joined text, per-row diff metadata (with real old/new line
+    /// numbers), and the index of the first changed row (for auto-scrolling).
+    fn inline_diff(old: &str, new: &str) -> (String, Vec<editor::DiffRow>, Option<usize>) {
+        let diff = similar::TextDiff::from_lines(old, new);
         let mut text = String::new();
         let mut rows: Vec<editor::DiffRow> = Vec::new();
-        let mut first_change: Option<usize> = None;
+        let mut first_change = None;
         for change in diff.iter_all_changes() {
             let kind = match change.tag() {
                 similar::ChangeTag::Equal => editor::DiffKind::Context,
@@ -1491,15 +1495,36 @@ impl App {
             }
             text.push_str(line);
         }
-        self.editor
-            .open_diff_view(format!("✎ {name}"), Path::new(&path), &text, rows);
-        // Jump to the first changed line so the edit is visible without scrolling (a few lines of
-        // context above it).
-        if let (Some(line), Some(b)) = (first_change, self.editor.active_buffer_mut()) {
+        (text, rows, first_change)
+    }
+
+    /// Open a read-only syntax-highlighted inline diff tab and jump to the first change. `path`
+    /// drives syntax highlighting; `tab` is the tab label.
+    fn open_inline_diff(&mut self, tab: String, path: &Path, old: &str, new: &str) {
+        let (text, rows, first) = Self::inline_diff(old, new);
+        self.editor.open_diff_view(tab, path, &text, rows);
+        if let (Some(line), Some(b)) = (first, self.editor.active_buffer_mut()) {
             b.cursor = (line, 0);
             b.scroll = line.saturating_sub(3);
         }
         self.editor_visible = true;
+        self.focus = Focus::Editor;
+    }
+
+    /// Show a proposed diff (old file on disk vs Claude's new contents) and await accept/reject.
+    fn open_diff(
+        &mut self,
+        path: String,
+        new_contents: String,
+        tab_name: String,
+        reply: oneshot::Sender<DiffDecision>,
+    ) {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let name = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(tab_name);
+        self.open_inline_diff(format!("✎ {name}"), Path::new(&path), &old, &new_contents);
         self.focus = Focus::Editor;
         self.pending_diff = Some(PendingDiff {
             reply,
@@ -1745,11 +1770,10 @@ impl App {
         match item {
             ScmItem::Change(i) => {
                 let path = self.git_changes[i].path.clone();
-                if let Some(diff) = self.git.as_ref().map(|g| g.file_diff(&path)) {
-                    self.editor.open_virtual(format!("◆ {path}"), "diff", &diff);
-                    self.editor_visible = true;
-                    self.focus = Focus::Editor;
-                }
+                let old = self.git.as_ref().map(|g| g.head_file(&path)).unwrap_or_default();
+                let new = std::fs::read_to_string(self.workspace.join(&path)).unwrap_or_default();
+                let full = self.workspace.join(&path);
+                self.open_inline_diff(format!("◆ {path}"), &full, &old, &new);
             }
             ScmItem::Commit(j) => {
                 if let Some((oid, short)) =
@@ -1773,12 +1797,13 @@ impl App {
                 if let Some((oid, short)) =
                     self.git_commits.get(commit).map(|c| (c.id, c.short.clone()))
                 {
-                    if let Some(diff) = self.git.as_ref().map(|g| g.commit_file_diff(oid, &path)) {
-                        self.editor
-                            .open_virtual(format!("● {short} ◆ {path}"), "diff", &diff);
-                        self.editor_visible = true;
-                        self.focus = Focus::Editor;
-                    }
+                    let (old, new) = self
+                        .git
+                        .as_ref()
+                        .map(|g| g.commit_file_versions(oid, &path))
+                        .unwrap_or_default();
+                    let full = self.workspace.join(&path);
+                    self.open_inline_diff(format!("● {short} ◆ {path}"), &full, &old, &new);
                 }
             }
         }
@@ -1874,11 +1899,69 @@ impl App {
         }
     }
 
+    /// Toggle the rendered-markdown preview for the active buffer.
+    fn toggle_preview(&mut self) {
+        match self.editor.active_buffer_mut() {
+            Some(b) if b.is_markdown() => {
+                self.status = if b.toggle_preview() {
+                    "markdown preview · alt+m to edit".into()
+                } else {
+                    "markdown source".into()
+                };
+            }
+            Some(_) => self.status = "preview is only for markdown files".into(),
+            None => {}
+        }
+    }
+
     fn handle_editor(&mut self, key: KeyEvent) {
         let km = &self.config.keymap;
         let (c, m) = (key.code, key.modifiers);
         let ctrl = m.contains(KeyModifiers::CONTROL);
         let alt = m.contains(KeyModifiers::ALT);
+
+        // Tab management works for every buffer type (including read-only previews/images/diffs).
+        if km.next_tab.matches(c, m) {
+            self.editor.next_tab();
+            self.reveal_active_in_tree();
+            return;
+        }
+        if km.prev_tab.matches(c, m) {
+            self.editor.prev_tab();
+            self.reveal_active_in_tree();
+            return;
+        }
+        if km.close_tab.matches(c, m) {
+            self.request_close(self.editor.active);
+            return;
+        }
+
+        // Image buffers are read-only and ignore other key input.
+        if self.editor.active_buffer().map(|b| b.image.is_some()).unwrap_or(false) {
+            return;
+        }
+
+        // Markdown preview is read-only: navigation scrolls the rendered view, the rest is ignored.
+        if self
+            .editor
+            .active_buffer()
+            .map(|b| b.preview && b.is_markdown())
+            .unwrap_or(false)
+        {
+            let vp = self.editor.viewport.max(1);
+            if let Some(b) = self.editor.active_buffer_mut() {
+                match c {
+                    KeyCode::Up => b.scroll = b.scroll.saturating_sub(1),
+                    KeyCode::Down => b.scroll += 1,
+                    KeyCode::PageUp => b.scroll = b.scroll.saturating_sub(vp),
+                    KeyCode::PageDown => b.scroll += vp,
+                    KeyCode::Home => b.scroll = 0,
+                    KeyCode::End => b.scroll = usize::MAX,
+                    _ => {}
+                }
+            }
+            return;
+        }
 
         if km.copy.matches(c, m) {
             if let Some(text) = self.editor.selected_text() {
@@ -1935,20 +2018,6 @@ impl App {
         }
         if km.find.matches(c, m) {
             self.search = Some(Search::default());
-            return;
-        }
-        if km.next_tab.matches(c, m) {
-            self.editor.next_tab();
-            self.reveal_active_in_tree();
-            return;
-        }
-        if km.prev_tab.matches(c, m) {
-            self.editor.prev_tab();
-            self.reveal_active_in_tree();
-            return;
-        }
-        if km.close_tab.matches(c, m) {
-            self.request_close(self.editor.active);
             return;
         }
 

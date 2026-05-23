@@ -30,6 +30,12 @@ pub enum AppEvent {
     },
     /// Claude asked to close the diff tab(s).
     CloseDiff,
+    /// A markdown preview's remote image finished downloading: raw bytes for `source` in `buffer`.
+    ImageLoaded {
+        buffer: PathBuf,
+        source: String,
+        data: Vec<u8>,
+    },
     /// Redraw cadence. Rendering is gated on a dirty flag so idle ticks are cheap.
     Tick,
 }
