@@ -84,7 +84,8 @@ Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); bo
 divider and the content↔strip divider are draggable.
 Editor: arrows + word motion (ctrl/alt+←/→, ctrl/alt+backspace), home/end = file top/bottom,
 click-to-place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c`/`ctrl+v` copy/
-paste (in-app clipboard + OSC52), `ctrl+z`/`ctrl+y` undo/redo.
+paste (in-app clipboard + OSC52), `ctrl+z`/`ctrl+y` undo/redo, `ctrl+f` find (live, n/total,
+↵/↑ next/prev).
 
 ## Deferred (future)
 

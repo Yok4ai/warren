@@ -113,6 +113,7 @@ pub struct Keymap {
     pub paste: KeyChord,
     pub undo: KeyChord,
     pub redo: KeyChord,
+    pub find: KeyChord,
     pub new_file: KeyChord,
     pub toggle_scrollbar: KeyChord,
     pub select_all: KeyChord,
@@ -141,6 +142,7 @@ impl Default for Keymap {
             paste: KeyChord::new(Char('v'), ctrl),
             undo: KeyChord::new(Char('z'), ctrl),
             redo: KeyChord::new(Char('y'), ctrl),
+            find: KeyChord::new(Char('f'), ctrl),
             new_file: KeyChord::new(Char('n'), ctrl),
             toggle_scrollbar: KeyChord::new(Char('s'), KeyModifiers::ALT),
             select_all: KeyChord::new(Char('a'), ctrl),
@@ -164,6 +166,7 @@ impl Keymap {
             ("Paste", self.paste),
             ("Undo", self.undo),
             ("Redo", self.redo),
+            ("Find", self.find),
             ("Cycle focus", self.focus_next),
             ("Toggle sidebar", self.toggle_sidebar),
             ("Toggle editor", self.toggle_editor),
@@ -200,6 +203,7 @@ impl Keymap {
                 "paste" => self.paste = chord,
                 "undo" => self.undo = chord,
                 "redo" => self.redo = chord,
+                "find" => self.find = chord,
                 "new_file" => self.new_file = chord,
                 "toggle_scrollbar" => self.toggle_scrollbar = chord,
                 "select_all" => self.select_all = chord,
@@ -254,6 +258,7 @@ copy = \"ctrl+c\"
 paste = \"ctrl+v\"
 undo = \"ctrl+z\"
 redo = \"ctrl+y\"
+find = \"ctrl+f\"
 new_file = \"ctrl+n\"
 toggle_scrollbar = \"alt+s\"
 select_all = \"ctrl+a\"

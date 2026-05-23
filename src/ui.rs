@@ -11,6 +11,7 @@ use crate::prompt::Prompt;
 use ratatui::Frame;
 
 use crate::app::{App, Focus, ScmItem, SidebarMode};
+use crate::find::Search;
 use crate::theme;
 
 /// The active theme (switchable at runtime).
@@ -76,6 +77,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(p) = app.palette.as_ref() {
         draw_palette(frame, p, frame.area());
+    }
+    if let Some(s) = app.search.as_ref() {
+        let area = if app.editor_area.width > 0 {
+            app.editor_area
+        } else {
+            frame.area()
+        };
+        draw_find_bar(frame, s, area);
     }
     if let Some(idx) = app.close_confirm {
         if let Some(name) = app.editor.tabs.get(idx).map(|b| b.name.as_str()) {
@@ -696,6 +705,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     draw_selection(frame, app, text_area);
+    draw_find_matches(frame, app, text_area);
 
     // Block cursor: blinking accent when focused, dim static otherwise. Drawn ourselves (rather
     // than the hardware cursor) so the blink is uniform with the terminal pane.
@@ -823,6 +833,76 @@ fn draw_selection(frame: &mut Frame, app: &App, content: Rect) {
         let w = (vend - vstart) as u16;
         frame.buffer_mut().set_style(Rect::new(x, y, w, 1), style);
     }
+}
+
+/// Highlight find matches within the visible window (active match in accent).
+fn draw_find_matches(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(s) = app.search.as_ref() else {
+        return;
+    };
+    let qlen = s.query.chars().count();
+    if qlen == 0 || s.matches.is_empty() {
+        return;
+    }
+    let Some(buf) = app.editor.active_buffer() else {
+        return;
+    };
+    let (scroll, hs) = (buf.scroll, buf.hscroll);
+    let h = area.height as usize;
+    let view_end = hs + area.width as usize;
+    for (i, &(line, col)) in s.matches.iter().enumerate() {
+        if line < scroll || line >= scroll + h {
+            continue;
+        }
+        let vstart = col.max(hs);
+        let vend = (col + qlen).min(view_end);
+        if vend <= vstart {
+            continue;
+        }
+        let style = if i == s.active {
+            Style::default().bg(dark().accent).fg(Color::Black)
+        } else {
+            Style::default().bg(dark().sel_bg)
+        };
+        let y = area.y + (line - scroll) as u16;
+        let x = area.x + (vstart - hs) as u16;
+        frame
+            .buffer_mut()
+            .set_style(Rect::new(x, y, (vend - vstart) as u16, 1), style);
+    }
+}
+
+/// A find widget at the editor's top-right showing the query and match count.
+fn draw_find_bar(frame: &mut Frame, s: &Search, area: Rect) {
+    let count = if s.matches.is_empty() {
+        "no matches".to_string()
+    } else {
+        format!("{}/{}", s.active + 1, s.matches.len())
+    };
+    let body = format!("{}  ({count})", s.query);
+    let w = (body.chars().count() as u16 + 4).clamp(24, area.width.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(w + 1);
+    let rect = Rect::new(x, area.y + 1, w, 3);
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(dark().accent))
+        .title(Span::styled(
+            " Find — Esc · ↵ next · ↑ prev ",
+            Style::default().fg(dark().accent).bold(),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(s.query.clone(), Style::default().fg(dark().fg)),
+            Span::styled(format!("  ({count})"), Style::default().fg(dark().dim)),
+        ])),
+        inner,
+    );
+    let cx = inner.x + (s.cursor as u16).min(inner.width.saturating_sub(1));
+    frame.set_cursor_position((cx, inner.y));
 }
 
 /// Placeholder shown when both the editor and the terminal panel are hidden.

@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::editor::Editor;
 use crate::event::{self, AppEvent};
 use crate::explorer::FileTree;
+use crate::find::Search;
 use crate::git::{Change, Commit, Git};
 use crate::palette::{self, Choice, Command, Palette};
 use crate::prompt::{Prompt, PromptKind};
@@ -113,6 +114,8 @@ pub struct App {
     pub close_confirm: Option<usize>,
     /// The command palette / fuzzy finder, when open.
     pub palette: Option<Palette>,
+    /// In-editor find, when open.
+    pub search: Option<Search>,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
     /// Current cursor-blink phase (on/off), and when blinking started.
@@ -209,6 +212,7 @@ impl App {
             prompt: None,
             close_confirm: None,
             palette: None,
+            search: None,
             show_help: false,
             blink_on: true,
             blink_start: Instant::now(),
@@ -754,6 +758,10 @@ impl App {
             self.handle_prompt(key);
             return;
         }
+        if self.search.is_some() {
+            self.handle_search(key);
+            return;
+        }
         // When the terminal is focused, almost everything is forwarded to Claude, so it does
         // NOT go through the global shortcut handler (only a few warren keys are reserved).
         if self.focus == Focus::Terminal {
@@ -1219,6 +1227,104 @@ impl App {
         }
     }
 
+    fn handle_search(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // Ctrl+F again (or Enter/Down) goes to the next match.
+        if self.config.keymap.find.matches(key.code, key.modifiers) {
+            if let Some(s) = &mut self.search {
+                s.next();
+            }
+            self.jump_to_active();
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.search = None,
+            KeyCode::Enter | KeyCode::Down => {
+                if let Some(s) = &mut self.search {
+                    s.next();
+                }
+                self.jump_to_active();
+            }
+            KeyCode::Up => {
+                if let Some(s) = &mut self.search {
+                    s.prev();
+                }
+                self.jump_to_active();
+            }
+            KeyCode::Backspace => {
+                if let Some(s) = &mut self.search {
+                    s.backspace();
+                }
+                self.recompute_search();
+            }
+            KeyCode::Left => {
+                if let Some(s) = &mut self.search {
+                    s.move_left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(s) = &mut self.search {
+                    s.move_right();
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                if let Some(s) = &mut self.search {
+                    s.insert_char(c);
+                }
+                self.recompute_search();
+            }
+            _ => {}
+        }
+    }
+
+    /// Recompute search matches in the active buffer (case-insensitive) and jump to the first
+    /// match at/after the cursor.
+    fn recompute_search(&mut self) {
+        let query = self
+            .search
+            .as_ref()
+            .map(|s| s.query.to_lowercase())
+            .unwrap_or_default();
+        let mut matches = Vec::new();
+        if !query.is_empty() {
+            if let Some(b) = self.editor.active_buffer() {
+                for li in 0..b.line_count() {
+                    let line = b.line_text(li).to_lowercase();
+                    let mut start = 0;
+                    while let Some(pos) = line[start..].find(&query) {
+                        let bp = start + pos;
+                        matches.push((li, line[..bp].chars().count()));
+                        start = bp + query.len().max(1);
+                        if start > line.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let cursor = self.editor.active_buffer().map(|b| b.cursor).unwrap_or((0, 0));
+        if let Some(s) = &mut self.search {
+            s.active = matches
+                .iter()
+                .position(|&(l, c)| (l, c) >= cursor)
+                .unwrap_or(0);
+            s.matches = matches;
+        }
+        self.jump_to_active();
+    }
+
+    fn jump_to_active(&mut self) {
+        let m = self.search.as_ref().and_then(|s| s.active_match());
+        if let Some((line, col)) = m {
+            let (vp, vw) = (self.editor.viewport.max(1), self.editor.viewport_w.max(1));
+            if let Some(b) = self.editor.active_buffer_mut() {
+                b.set_cursor(line, col);
+                b.ensure_cursor_visible(vp, vw);
+            }
+        }
+    }
+
     fn handle_sidebar(&mut self, key: KeyEvent) {
         match self.sidebar_mode {
             SidebarMode::Explorer => {
@@ -1502,6 +1608,10 @@ impl App {
         }
         if km.select_all.matches(c, m) {
             self.editor.select_all();
+            return;
+        }
+        if km.find.matches(c, m) {
+            self.search = Some(Search::default());
             return;
         }
         if km.next_tab.matches(c, m) {
