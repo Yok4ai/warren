@@ -61,7 +61,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - Comments explain *why*, match surrounding density. Keep `cargo clippy` warning-free.
 - Mouse capture is on, so native terminal selection needs Shift+drag; warren does its own
   pane-scoped selection instead.
-- **Scrollbar house style** (editor vertical/horizontal, sidebar — keep all consistent):
+- **Scrollbar house style** (editor vertical/horizontal, sidebar, terminal — keep all consistent;
+  the terminal one maps vt100 scrollback to `draw_scrollbar` and reserves a content column):
   1. Custom-drawn via `draw_scrollbar` / `buf.cell_mut` — NOT ratatui's `Scrollbar` (it maps the
      thumb against total length and stops short of the end).
   2. Thumb sized to the visible fraction and positioned over the draggable range `track - thumb`,
@@ -81,7 +82,11 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run
 `claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
 Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel
-divider and the content↔strip divider are draggable.
+divider and the content↔strip divider are draggable. Terminal scrollback: 5000 lines; wheel or
+`pageup`/`pagedown` scrolls it for normal-screen apps, alt-screen apps (vim/htop) get the wheel and
+page keys themselves (`alt+pageup`/`alt+pagedown` forces a scroll there); typing snaps to live. Drag selects text (copy-on-release); a plain click forwards
+to the app. (Kitty grabs `shift+pageup`/`shift+drag` for its own scrollback/selection, so warren
+uses `alt`/plain-drag, which reach it.)
 Editor: arrows + word motion (ctrl/alt+←/→, ctrl/alt+backspace), home/end = file top/bottom,
 click-to-place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c`/`ctrl+v` copy/
 paste (in-app clipboard + OSC52), `ctrl+z`/`ctrl+y` undo/redo, `ctrl+f` find (live, n/total,

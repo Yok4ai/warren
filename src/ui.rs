@@ -1023,7 +1023,17 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let strip = tabblock.inner(tabcol);
     frame.render_widget(tabblock, tabcol);
 
-    app.panel.content_area = content;
+    // Reserve a column for the scrollbar (house style, toggled by alt+s) when there's history.
+    let (sb_off, sb_max) = app.panel.active().map(|t| t.scrollback_state()).unwrap_or((0, 0));
+    let show_term_sb = app.show_scrollbar && sb_max > 0 && content.width > 1 && content.height > 1;
+    let term_content = if show_term_sb {
+        Rect::new(content.x, content.y, content.width - 1, content.height)
+    } else {
+        content
+    };
+    app.term_sb_col = show_term_sb.then(|| content.x + content.width - 1);
+
+    app.panel.content_area = term_content;
     app.panel.tablist_area = strip;
     app.panel_divider_col = tabcol.x;
     app.panel_inner_right = inner.x + inner.width;
@@ -1061,14 +1071,49 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let blink = app.blink_on;
     if let Some(t) = app.panel.active_mut() {
-        t.resize(content.height, content.width);
+        t.resize(term_content.height, term_content.width);
         let parser = t.lock();
         // Cursor blinks (via visibility) when the panel is focused; hidden otherwise.
         let cursor = tui_term::widget::Cursor::default()
             .visibility(focused && blink)
             .overlay_style(Style::default().bg(dark().accent).fg(Color::Black));
         let term = tui_term::widget::PseudoTerminal::new(parser.screen()).cursor(cursor);
-        frame.render_widget(term, content);
+        frame.render_widget(term, term_content);
+    }
+
+    // Scrollbar over the reserved column: history modelled as `max + view` lines, view top at
+    // `max - offset` so the thumb sits flush at the bottom when live (offset 0).
+    if show_term_sb {
+        draw_scrollbar(
+            frame,
+            content,
+            sb_max + term_content.height as usize,
+            sb_max - sb_off,
+        );
+    }
+
+    // Overlay the text selection (drag) by tinting the selected cells.
+    if let Some((anchor, cursor)) = app.term_sel {
+        let (a, b) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        let sel = Style::default().bg(dark().sel_bg);
+        let bufm = frame.buffer_mut();
+        for r in a.0..=b.0 {
+            if r >= term_content.height {
+                break;
+            }
+            // Column span on this row: full width for interior rows, trimmed on the first/last.
+            let c0 = if r == a.0 { a.1 } else { 0 };
+            let c1 = if r == b.0 { b.1 } else { term_content.width.saturating_sub(1) };
+            for c in c0..=c1 {
+                if c < term_content.width {
+                    bufm.set_style(Rect::new(term_content.x + c, term_content.y + r, 1, 1), sel);
+                }
+            }
+        }
     }
 }
 

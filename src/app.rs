@@ -147,6 +147,15 @@ pub struct App {
     /// Per-frame geometry of the tab-strip divider (set by the renderer).
     pub panel_divider_col: u16,
     pub panel_inner_right: u16,
+    /// Terminal text selection: anchor + cursor as `(row, col)` within the terminal content area.
+    /// Highlighted on screen; copied to the clipboard when the drag ends.
+    pub term_sel: Option<((u16, u16), (u16, u16))>,
+    /// True while a terminal selection drag is in progress.
+    term_selecting: bool,
+    /// Column of the terminal scrollbar when shown (for hit-testing), else None.
+    pub term_sb_col: Option<u16>,
+    dragging_term_sb: bool,
+    term_sb_grab: i32,
     /// Per-frame geometry for mouse mapping (set by the renderer).
     pub editor_area: Rect,
     pub terminal_area: Rect,
@@ -239,6 +248,11 @@ impl App {
             resizing_strip: false,
             panel_divider_col: 0,
             panel_inner_right: 0,
+            term_sel: None,
+            term_selecting: false,
+            term_sb_col: None,
+            dragging_term_sb: false,
+            term_sb_grab: 0,
             editor_area: Rect::default(),
             terminal_area: Rect::default(),
             editor_hbar: None,
@@ -418,7 +432,17 @@ impl App {
                     // Scroll the view by an offset (don't move the selection).
                     self.sidebar_scroll_by(if down { 3 } else { -3 });
                 } else if in_terminal {
-                    self.forward_terminal_mouse(&m);
+                    // Normal-screen apps (claude, shells) scroll our scrollback; alternate-screen
+                    // apps (vim/htop/less) manage their own scroll, so forward the wheel to them.
+                    // Shift forces scrollback even on the alternate screen.
+                    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+                    let alt_screen = self.panel.active().map(|t| t.in_alt_screen()).unwrap_or(false);
+                    if alt_screen && !shift {
+                        self.forward_terminal_mouse(&m);
+                    } else if let Some(t) = self.panel.active_mut() {
+                        t.scroll(if down { -3 } else { 3 });
+                        self.term_sel = None;
+                    }
                 } else if down {
                     self.editor.scroll_down(3);
                 } else {
@@ -427,7 +451,15 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if on_strip_divider {
+                // Any new press clears a prior terminal selection; the terminal branch re-arms it.
+                self.term_sel = None;
+                self.term_selecting = false;
+                if self.on_term_sb(&m) {
+                    // Checked before the strip divider, whose grab range abuts the scrollbar column.
+                    self.focus = Focus::Terminal;
+                    self.dragging_term_sb = true;
+                    self.term_sb_grab = self.term_sb_grab_offset(m.row);
+                } else if on_strip_divider {
                     self.resizing_strip = true;
                 } else if on_term_divider {
                     self.resizing_term = true;
@@ -458,8 +490,13 @@ impl App {
                     self.focus = Focus::Terminal;
                     if rect_contains(self.panel.tablist_area, m.column, m.row) {
                         self.handle_tablist_click(m.column, m.row);
-                    } else {
-                        self.forward_terminal_mouse(&m);
+                    } else if let Some(pos) = self.term_cell(m.column, m.row) {
+                        // Press in the terminal begins a potential selection. A drag selects text;
+                        // a plain click (no movement) is forwarded to the app on release so clicks
+                        // still reach it. (Kitty grabs Shift+drag for its own selection, so we must
+                        // use plain drag — which reaches us since warren holds the mouse capture.)
+                        self.term_sel = Some((pos, pos));
+                        self.term_selecting = false;
                     }
                 } else if self.editor_visible {
                     self.focus = Focus::Editor;
@@ -515,6 +552,28 @@ impl App {
                     // Strip grows toward the left as the divider moves left.
                     let w = self.panel_inner_right.saturating_sub(m.column);
                     self.panel_strip_w = w.clamp(5, 40);
+                } else if self.dragging_term_sb {
+                    self.term_sb_to(m.row);
+                } else if self.term_sel.is_some() {
+                    self.term_selecting = true;
+                    if let (Some(pos), Some((anchor, _))) =
+                        (self.term_cell(m.column, m.row), self.term_sel)
+                    {
+                        self.term_sel = Some((anchor, pos));
+                    }
+                    // Dragging past the top/bottom edge scrolls the scrollback.
+                    let a = self.panel.content_area;
+                    if a.height > 0 {
+                        if m.row < a.y {
+                            if let Some(t) = self.panel.active_mut() {
+                                t.scroll(1);
+                            }
+                        } else if m.row >= a.y + a.height {
+                            if let Some(t) = self.panel.active_mut() {
+                                t.scroll(-1);
+                            }
+                        }
+                    }
                 } else if in_terminal {
                     self.forward_terminal_mouse(&m);
                 } else if self.editor.selection.is_some() {
@@ -553,6 +612,37 @@ impl App {
                     self.resizing_term = false;
                 } else if self.resizing_strip {
                     self.resizing_strip = false;
+                } else if self.dragging_term_sb {
+                    self.dragging_term_sb = false;
+                } else if self.term_selecting {
+                    self.term_selecting = false;
+                    // Copy-on-select: a completed (non-empty) selection goes to the clipboard.
+                    if let Some((anchor, cursor)) = self.term_sel {
+                        let text = self
+                            .panel
+                            .active()
+                            .map(|t| t.selection_text(anchor, cursor))
+                            .unwrap_or_default();
+                        if text.trim().is_empty() {
+                            self.term_sel = None;
+                        } else {
+                            let n = text.chars().count();
+                            self.clipboard = text.clone();
+                            copy_to_clipboard(&text);
+                            self.status = format!("copied {n} chars");
+                        }
+                    }
+                } else if self.term_sel.take().is_some() {
+                    // Pressed and released without moving: a click — forward press+release so the
+                    // app (e.g. claude) still sees it, but only if it actually wants the mouse.
+                    if self.panel.active().map(|t| t.wants_mouse()).unwrap_or(false) {
+                        let down = MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            ..m
+                        };
+                        self.forward_terminal_mouse(&down);
+                        self.forward_terminal_mouse(&m);
+                    }
                 } else if in_terminal {
                     self.forward_terminal_mouse(&m);
                 } else if let Some(text) = self.editor.selected_text() {
@@ -567,6 +657,18 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Map an absolute mouse position to a `(row, col)` cell within the terminal content area,
+    /// clamped to its bounds. None if there's no content area.
+    fn term_cell(&self, col: u16, row: u16) -> Option<(u16, u16)> {
+        let a = self.panel.content_area;
+        if a.width == 0 || a.height == 0 {
+            return None;
+        }
+        let r = row.clamp(a.y, a.y + a.height - 1) - a.y;
+        let c = col.clamp(a.x, a.x + a.width - 1) - a.x;
+        Some((r, c))
     }
 
     /// Forward a mouse event to the active terminal, relative to its content area.
@@ -744,6 +846,56 @@ impl App {
         let max_scroll = total - track;
         let denom = track.saturating_sub(thumb).max(1);
         let thumb_top = scroll * denom / max_scroll;
+        row as i32 - ca.y as i32 - thumb_top as i32
+    }
+
+    fn on_term_sb(&self, m: &MouseEvent) -> bool {
+        let Some(sx) = self.term_sb_col else {
+            return false;
+        };
+        let ca = self.panel.content_area;
+        m.column == sx && m.row >= ca.y && m.row < ca.y + ca.height
+    }
+
+    /// Set the terminal scrollback position from a scrollbar row. The history is modelled as a
+    /// column of `max + track` lines; the view top is `max - offset`, so the thumb sits flush at
+    /// the bottom when live (offset 0). Inverts `draw_scrollbar`'s thumb formula like the editor.
+    fn term_sb_to(&mut self, row: u16) {
+        let ca = self.panel.content_area;
+        let track = ca.height as usize;
+        let (_, max) = match self.panel.active() {
+            Some(t) => t.scrollback_state(),
+            None => return,
+        };
+        if track == 0 || max == 0 {
+            return;
+        }
+        let total = max + track;
+        let thumb = ((track * track) / total).clamp(1, track);
+        let denom = track.saturating_sub(thumb).max(1);
+        let target_top = (row as i32 - ca.y as i32 - self.term_sb_grab).clamp(0, denom as i32) as usize;
+        let scroll = target_top * max / denom;
+        if let Some(t) = self.panel.active_mut() {
+            t.set_scrollback_offset(max.saturating_sub(scroll));
+        }
+        self.term_sel = None;
+    }
+
+    fn term_sb_grab_offset(&self, row: u16) -> i32 {
+        let ca = self.panel.content_area;
+        let track = ca.height as usize;
+        let (offset, max) = match self.panel.active() {
+            Some(t) => t.scrollback_state(),
+            None => return 0,
+        };
+        if track == 0 || max == 0 {
+            return 0;
+        }
+        let total = max + track;
+        let thumb = ((track * track) / total).clamp(1, track);
+        let denom = track.saturating_sub(thumb).max(1);
+        let scroll = max - offset;
+        let thumb_top = scroll * denom / max;
         row as i32 - ca.y as i32 - thumb_top as i32
     }
 
@@ -955,6 +1107,8 @@ impl App {
             self.editor_visible = !self.editor_visible;
         } else if km.toggle_panel.matches(c, m) {
             self.toggle_panel();
+        } else if km.toggle_scrollbar.matches(c, m) {
+            self.show_scrollbar = !self.show_scrollbar;
         } else if km.command_palette.matches(c, m) {
             self.open_palette();
         } else if km.new_terminal.matches(c, m) || is_ctrl_tilde(c, m) {
@@ -968,8 +1122,24 @@ impl App {
             if self.panel.is_empty() {
                 self.focus = Focus::Editor;
             }
+        } else if matches!(c, KeyCode::PageUp | KeyCode::PageDown)
+            && (m.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                || !self.panel.active().map(|t| t.in_alt_screen()).unwrap_or(false))
+        {
+            // PageUp/PageDown scrolls the scrollback by a screenful for normal-screen apps (claude,
+            // shells, which don't use those keys). Alt-screen apps (vim/less) page themselves, so
+            // the keys forward to them — unless Alt/Shift forces a scroll (Alt because kitty grabs
+            // Shift+PageUp for its own scrollback).
+            let page = self.terminal_area.height.max(2) as i32 - 1;
+            if let Some(t) = self.panel.active_mut() {
+                t.scroll(if c == KeyCode::PageUp { page } else { -page });
+            }
+            self.term_sel = None;
         } else if let Some(t) = self.panel.active_mut() {
+            // Typing snaps back to live output, like a real terminal.
+            t.scroll_to_bottom();
             t.send_key(c, m);
+            self.term_sel = None;
         }
     }
 
@@ -1290,12 +1460,16 @@ impl App {
         let diff = similar::TextDiff::from_lines(&old, &new_contents);
         let mut text = String::new();
         let mut rows: Vec<editor::DiffRow> = Vec::new();
+        let mut first_change: Option<usize> = None;
         for change in diff.iter_all_changes() {
             let kind = match change.tag() {
                 similar::ChangeTag::Equal => editor::DiffKind::Context,
                 similar::ChangeTag::Delete => editor::DiffKind::Del,
                 similar::ChangeTag::Insert => editor::DiffKind::Add,
             };
+            if kind != editor::DiffKind::Context && first_change.is_none() {
+                first_change = Some(rows.len());
+            }
             rows.push(editor::DiffRow {
                 kind,
                 old: change.old_index().map(|i| i + 1),
@@ -1309,6 +1483,12 @@ impl App {
         }
         self.editor
             .open_diff_view(format!("✎ {name}"), Path::new(&path), &text, rows);
+        // Jump to the first changed line so the edit is visible without scrolling (a few lines of
+        // context above it).
+        if let (Some(line), Some(b)) = (first_change, self.editor.active_buffer_mut()) {
+            b.cursor = (line, 0);
+            b.scroll = line.saturating_sub(3);
+        }
         self.editor_visible = true;
         self.focus = Focus::Editor;
         self.pending_diff = Some(PendingDiff {

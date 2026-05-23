@@ -28,6 +28,9 @@ pub struct TerminalPane {
     exited: Arc<AtomicBool>,
 }
 
+/// Lines of scrollback to retain per terminal.
+const SCROLLBACK: usize = 5000;
+
 impl TerminalPane {
     /// Spawn `command` in a PTY of the given size, inheriting the environment and running in `cwd`.
     pub fn spawn(
@@ -60,7 +63,11 @@ impl TerminalPane {
         let mut child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows.max(1), cols.max(1), 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            rows.max(1),
+            cols.max(1),
+            SCROLLBACK,
+        )));
         let writer = pair.master.take_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
         let exited = Arc::new(AtomicBool::new(false));
@@ -141,6 +148,64 @@ impl TerminalPane {
         self.write(b"\x1b[201~");
     }
 
+    /// True if the app is on the alternate screen (vim/htop/less). Those manage their own
+    /// scrolling, so the wheel goes to them; normal-screen apps (claude, shells) scroll our
+    /// scrollback instead.
+    pub fn in_alt_screen(&self) -> bool {
+        self.parser.lock().unwrap().screen().alternate_screen()
+    }
+
+    /// True if the app has requested mouse reporting (claude); a plain click is only forwarded
+    /// in that case, so clicks in a mouse-unaware shell don't inject escape bytes.
+    pub fn wants_mouse(&self) -> bool {
+        self.parser.lock().unwrap().screen().mouse_protocol_mode()
+            != vt100::MouseProtocolMode::None
+    }
+
+    /// Text of the selection between two `(row, col)` cells (inclusive of the cursor cell),
+    /// read from the currently visible grid (so it respects the scrollback position).
+    pub fn selection_text(&self, anchor: (u16, u16), cursor: (u16, u16)) -> String {
+        let (a, b) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        let p = self.parser.lock().unwrap();
+        let screen = p.screen();
+        let (_, cols) = screen.size();
+        screen.contents_between(a.0, a.1, b.0, (b.1 + 1).min(cols))
+    }
+
+    /// Scroll the local scrollback buffer by `delta` lines (positive = back into history).
+    /// vt100 clamps to the available scrollback and keeps the view anchored as new output arrives.
+    pub fn scroll(&mut self, delta: i32) {
+        let mut p = self.parser.lock().unwrap();
+        let cur = p.screen().scrollback() as i64;
+        let new = (cur + delta as i64).max(0) as usize;
+        p.set_scrollback(new);
+    }
+
+    /// Jump back to live output (bottom of the scrollback).
+    pub fn scroll_to_bottom(&mut self) {
+        self.parser.lock().unwrap().set_scrollback(0);
+    }
+
+    /// `(current offset, max offset)` lines above the live view. The max is found by asking vt100
+    /// for an impossible scrollback (it clamps to the real size) and restoring the position.
+    pub fn scrollback_state(&self) -> (usize, usize) {
+        let mut p = self.parser.lock().unwrap();
+        let cur = p.screen().scrollback();
+        p.set_scrollback(usize::MAX);
+        let max = p.screen().scrollback();
+        p.set_scrollback(cur);
+        (cur, max)
+    }
+
+    /// Set the scrollback position to exactly `offset` lines above the live view (vt100 clamps).
+    pub fn set_scrollback_offset(&mut self, offset: usize) {
+        self.parser.lock().unwrap().set_scrollback(offset);
+    }
+
     /// Forward a mouse event with coordinates already made relative to the pane (1-based).
     pub fn send_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
         if let Some(bytes) = mouse_to_bytes(kind, col, row) {
@@ -171,6 +236,10 @@ impl Panel {
         self.terms.push(pane);
         self.active = self.terms.len() - 1;
         self.visible = true;
+    }
+
+    pub fn active(&self) -> Option<&TerminalPane> {
+        self.terms.get(self.active)
     }
 
     pub fn active_mut(&mut self) -> Option<&mut TerminalPane> {
