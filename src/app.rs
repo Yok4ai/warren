@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::editor::Editor;
 use crate::event::{self, AppEvent};
 use crate::explorer::FileTree;
+use crate::palette::{self, Choice, Command, Palette};
 use crate::prompt::{Prompt, PromptKind};
 use crate::terminal::{Panel, TerminalPane};
 use crate::tui::Tui;
@@ -56,6 +57,8 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// Tab index awaiting a save/discard/cancel decision before closing, if any.
     pub close_confirm: Option<usize>,
+    /// The command palette / fuzzy finder, when open.
+    pub palette: Option<Palette>,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
     /// Current cursor-blink phase (on/off), and when blinking started.
@@ -123,6 +126,7 @@ impl App {
             term_width: 80,
             prompt: None,
             close_confirm: None,
+            palette: None,
             show_help: false,
             blink_on: true,
             blink_start: Instant::now(),
@@ -598,6 +602,10 @@ impl App {
             self.handle_close_confirm(key);
             return;
         }
+        if self.palette.is_some() {
+            self.handle_palette(key);
+            return;
+        }
         if self.prompt.is_some() {
             self.handle_prompt(key);
             return;
@@ -652,7 +660,7 @@ impl App {
         } else if km.help.matches(c, m) {
             self.show_help = true;
         } else if km.command_palette.matches(c, m) {
-            self.status = "command palette: coming in Phase 4".into();
+            self.open_palette();
         } else if km.new_terminal.matches(c, m) || is_ctrl_tilde(c, m) {
             self.spawn_terminal();
         } else if km.toggle_panel.matches(c, m) {
@@ -739,6 +747,8 @@ impl App {
             self.editor_visible = !self.editor_visible;
         } else if km.toggle_panel.matches(c, m) {
             self.toggle_panel();
+        } else if km.command_palette.matches(c, m) {
+            self.open_palette();
         } else if km.new_terminal.matches(c, m) || is_ctrl_tilde(c, m) {
             self.spawn_terminal();
         } else if km.next_tab.matches(c, m) {
@@ -916,6 +926,104 @@ impl App {
             }
             KeyCode::Char('c' | 'C') | KeyCode::Esc => self.close_confirm = None,
             _ => {}
+        }
+    }
+
+    fn open_palette(&mut self) {
+        self.palette = Some(Palette::new(palette::gather_files(&self.workspace)));
+    }
+
+    fn handle_palette(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => self.palette = None,
+            KeyCode::Enter => {
+                let choice = self.palette.as_ref().and_then(|p| p.choose(&self.workspace));
+                self.palette = None;
+                match choice {
+                    Some(Choice::File(path)) => match self.editor.open(&path) {
+                        Ok(()) => {
+                            self.editor_visible = true;
+                            self.focus = Focus::Editor;
+                            self.status = path.display().to_string();
+                        }
+                        Err(e) => self.status = format!("error: {e}"),
+                    },
+                    Some(Choice::Command(cmd)) => self.run_command(cmd),
+                    None => {}
+                }
+            }
+            KeyCode::Up => {
+                if let Some(p) = &mut self.palette {
+                    p.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.palette {
+                    p.move_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.palette {
+                    p.backspace();
+                }
+            }
+            KeyCode::Left => {
+                if let Some(p) = &mut self.palette {
+                    p.move_left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(p) = &mut self.palette {
+                    p.move_right();
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                if let Some(p) = &mut self.palette {
+                    p.insert_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn run_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::NewFile => self.open_new_file_prompt(),
+            Command::NewTerminal => self.spawn_terminal(),
+            Command::TogglePanel => self.toggle_panel(),
+            Command::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                if !self.sidebar_visible && self.focus == Focus::Sidebar {
+                    self.cycle_focus();
+                }
+            }
+            Command::ToggleEditor => {
+                self.editor_visible = !self.editor_visible;
+                if !self.editor_visible && self.focus == Focus::Editor {
+                    self.cycle_focus();
+                }
+            }
+            Command::Save => match self.editor.save_active() {
+                Ok(()) => self.status = "saved".into(),
+                Err(e) => self.status = format!("save failed: {e}"),
+            },
+            Command::SelectAll => {
+                self.editor.select_all();
+                self.focus = Focus::Editor;
+            }
+            Command::ToggleScrollbar => self.show_scrollbar = !self.show_scrollbar,
+            Command::ToggleAutosave => {
+                self.auto_save = !self.auto_save;
+                self.status = if self.auto_save {
+                    "auto-save: on".into()
+                } else {
+                    "auto-save: off".into()
+                };
+            }
+            Command::Help => self.show_help = true,
+            Command::Quit => self.should_quit = true,
         }
     }
 

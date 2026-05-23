@@ -271,7 +271,13 @@ fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
                 out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             }
         }
-        KeyCode::Enter => out.push(b'\r'),
+        KeyCode::Enter => {
+            // Alt+Enter / Ctrl+Enter -> ESC CR (apps like claude treat this as "insert newline").
+            if alt || ctrl {
+                out.push(0x1b);
+            }
+            out.push(b'\r');
+        }
         KeyCode::Tab => out.push(b'\t'),
         KeyCode::BackTab => out.extend_from_slice(b"\x1b[Z"),
         KeyCode::Backspace => {

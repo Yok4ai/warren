@@ -6,6 +6,7 @@ mod editor;
 mod event;
 mod explorer;
 mod highlight;
+mod palette;
 mod prompt;
 mod terminal;
 mod theme;

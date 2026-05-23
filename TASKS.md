@@ -24,11 +24,13 @@ Phased build of the TUI IDE. Design doc: `~/.claude/plans/i-want-you-to-ancient-
       Focus cycling, mouse forwarding, bracketed paste. Drag-and-drop from explorer → terminal
       (inserts path) or editor (opens). Blinking cursor (editor + terminal). Editor line numbers.
 
+- [x] **Phase 4 — Command palette.** `ctrl+p` fuzzy file finder (nucleo-matcher) + command mode
+      (`>`). Works from any focus (incl. terminals). Terminal newline: alt/ctrl+Enter → ESC CR.
+
 ## Next
 
-- [ ] **Phase 4 — Command palette.** `ctrl+p` fuzzy file finder + command list (nucleo).
-      Reuses `prompt.rs`'s input. Also enables Save As / quick-open.
-- [ ] **Phase 6 — Git.** `git2` status/stage/commit/push/pull/diff + SCM sidebar + commit graph.
+- [ ] **Phase 6 — Git.** `git2` status/stage/commit/push/pull/diff + SCM sidebar view (changes
+      list + commit graph; click a commit for author/time/message + diff). VS Code-style.
 
 ## Later / deferred
 

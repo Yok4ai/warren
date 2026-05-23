@@ -6,6 +6,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::palette::Palette;
 use crate::prompt::Prompt;
 use ratatui::Frame;
 
@@ -58,6 +59,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Some(prompt) = app.prompt.as_ref() {
         draw_prompt(frame, prompt, frame.area());
+    }
+    if let Some(p) = app.palette.as_ref() {
+        draw_palette(frame, p, frame.area());
     }
     if let Some(idx) = app.close_confirm {
         if let Some(name) = app.editor.tabs.get(idx).map(|b| b.name.as_str()) {
@@ -165,6 +169,74 @@ fn draw_confirm(frame: &mut Frame, name: &str, area: Rect) {
         ]),
     ];
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
+/// The command palette: an input line plus a scrolling, fuzzy-filtered results list.
+fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
+    let w = (area.width * 3 / 5).clamp(40, 90).min(area.width.saturating_sub(2));
+    let h = 16.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 4;
+    let rect = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, rect);
+    let title = if p.command_mode() {
+        " Commands "
+    } else {
+        " Open File — type, or > for commands "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DARK.accent))
+        .title(Span::styled(title, Style::default().fg(DARK.accent).bold()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let [input_row, list] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+
+    if p.input.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "search files…",
+                Style::default().fg(DARK.dim),
+            )),
+            input_row,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(Span::styled(p.input.as_str(), Style::default().fg(DARK.fg))),
+            input_row,
+        );
+    }
+    let cx = input_row.x + (p.cursor as u16).min(input_row.width.saturating_sub(1));
+    frame.set_cursor_position((cx, input_row.y));
+
+    let height = list.height as usize;
+    let offset = if p.selected >= height {
+        p.selected + 1 - height
+    } else {
+        0
+    };
+    let width = list.width as usize;
+    let lines: Vec<Line> = p
+        .results
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(i, s)| {
+            if i == p.selected {
+                Line::from(Span::styled(
+                    format!("{s:<width$}"),
+                    Style::default().bg(DARK.accent).fg(Color::Black),
+                ))
+            } else {
+                Line::from(Span::styled(s.clone(), Style::default().fg(DARK.fg)))
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list);
 }
 
 /// A centered modal input box.
