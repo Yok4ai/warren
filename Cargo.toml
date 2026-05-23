@@ -2,6 +2,14 @@
 name = "warren"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal IDE that wraps the real Claude Code CLI: file explorer, editor, embedded claude pane, git, and live accept/reject diffs."
+license = "MIT"
+repository = "https://github.com/Yok4ai/warren"
+homepage = "https://github.com/Yok4ai/warren"
+readme = "README.md"
+keywords = ["tui", "ide", "claude", "terminal", "editor"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -26,3 +34,8 @@ tokio-tungstenite = "0.29.0"
 toml = "1.1.2"
 tui-term = "0.2.0"
 vt100 = "0.15.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
