@@ -62,7 +62,12 @@ pub struct Buffer {
     readonly: bool,
     /// A diff/patch buffer: rendered with green/red line backgrounds.
     pub is_diff: bool,
+    /// Undo/redo snapshots of `(rope, cursor)`. Rope clones are cheap (structural sharing).
+    undo: Vec<(Rope, (usize, usize))>,
+    redo: Vec<(Rope, (usize, usize))>,
 }
+
+const UNDO_LIMIT: usize = 1000;
 
 impl Buffer {
     fn from_path(path: &Path) -> Result<Self> {
@@ -90,6 +95,8 @@ impl Buffer {
             last_edit: Instant::now(),
             readonly: false,
             is_diff: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
         })
     }
 
@@ -134,6 +141,8 @@ impl Buffer {
             last_edit: Instant::now(),
             readonly: true,
             is_diff,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -185,10 +194,49 @@ impl Buffer {
         self.dirty_from = Some(self.dirty_from.map_or(line, |d| d.min(line)));
     }
 
+    /// Snapshot the current state onto the undo stack before a mutation (clears redo).
+    fn push_undo(&mut self) {
+        self.undo.push((self.rope.clone(), self.cursor));
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some((rope, cursor)) = self.undo.pop() {
+            self.redo.push((self.rope.clone(), self.cursor));
+            self.restore(rope, cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some((rope, cursor)) = self.redo.pop() {
+            self.undo.push((self.rope.clone(), self.cursor));
+            self.restore(rope, cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn restore(&mut self, rope: Rope, cursor: (usize, usize)) {
+        self.rope = rope;
+        let last = self.rope.len_lines().saturating_sub(1);
+        let line = cursor.0.min(last);
+        self.cursor = (line, cursor.1.min(self.line_len(line)));
+        self.modified = true;
+        self.dirty_from = Some(0);
+    }
+
     pub fn insert_char(&mut self, ch: char) {
         if self.readonly {
             return;
         }
+        self.push_undo();
         let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert_char(idx, ch);
@@ -201,6 +249,7 @@ impl Buffer {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.push_undo();
         let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert(idx, s);
@@ -210,6 +259,7 @@ impl Buffer {
 
     /// Insert possibly-multi-line text (e.g. a paste) at the cursor, advancing the cursor.
     pub fn insert_text(&mut self, s: &str) {
+        self.push_undo();
         let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert(idx, s);
@@ -228,6 +278,7 @@ impl Buffer {
         let start = self.rope.line_to_char(sl) + sc;
         let end = (self.rope.line_to_char(el) + ec).min(self.rope.len_chars());
         if start < end {
+            self.push_undo();
             self.rope.remove(start..end);
             self.cursor = (sl, sc);
             self.mark_dirty(sl);
@@ -237,11 +288,13 @@ impl Buffer {
     pub fn backspace(&mut self) {
         let (l, c) = self.cursor;
         if c > 0 {
+            self.push_undo();
             let idx = self.cursor_char();
             self.rope.remove(idx - 1..idx);
             self.cursor.1 -= 1;
             self.mark_dirty(l);
         } else if l > 0 {
+            self.push_undo();
             let prev_len = self.line_len(l - 1);
             let idx = self.rope.line_to_char(l); // start of line l == just after prev newline
             self.rope.remove(idx - 1..idx);
@@ -254,10 +307,12 @@ impl Buffer {
         let (l, c) = self.cursor;
         let idx = self.cursor_char();
         if c < self.line_len(l) {
+            self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.mark_dirty(l);
         } else if l + 1 < self.rope.len_lines() {
             // At end of line: remove the newline to join the next line.
+            self.push_undo();
             self.rope.remove(idx..idx + 1);
             self.mark_dirty(l);
         }
@@ -343,6 +398,7 @@ impl Buffer {
             self.backspace();
             return;
         }
+        self.push_undo();
         let target = self.word_left_col(self.cursor.0, self.cursor.1);
         let line_start = self.rope.line_to_char(self.cursor.0);
         self.rope.remove(line_start + target..line_start + self.cursor.1);

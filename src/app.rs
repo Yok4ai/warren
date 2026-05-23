@@ -103,6 +103,8 @@ pub struct App {
     pub auto_save: bool,
     /// Paint a solid theme background (overrides terminal transparency).
     pub solid_bg: bool,
+    /// In-app clipboard for ctrl+c / ctrl+v (also mirrored to the system clipboard via OSC 52).
+    clipboard: String,
     /// Last known terminal width, for clamping resize drags.
     pub term_width: u16,
     /// Active modal prompt (e.g. new-file input), if any.
@@ -202,6 +204,7 @@ impl App {
             show_scrollbar: true,
             auto_save: false,
             solid_bg,
+            clipboard: String::new(),
             term_width: 80,
             prompt: None,
             close_confirm: None,
@@ -516,6 +519,7 @@ impl App {
                     self.forward_terminal_mouse(&m);
                 } else if let Some(text) = self.editor.selected_text() {
                     let n = text.chars().count();
+                    self.clipboard = text.clone();
                     copy_to_clipboard(&text);
                     self.status = format!("copied {n} chars");
                 } else {
@@ -1447,12 +1451,45 @@ impl App {
         let ctrl = m.contains(KeyModifiers::CONTROL);
         let alt = m.contains(KeyModifiers::ALT);
 
-        // Ctrl+C copies the current selection (if any).
-        if c == KeyCode::Char('c') && ctrl {
+        if km.copy.matches(c, m) {
             if let Some(text) = self.editor.selected_text() {
                 let n = text.chars().count();
+                self.clipboard = text.clone();
                 copy_to_clipboard(&text);
                 self.status = format!("copied {n} chars");
+            }
+            return;
+        }
+        if km.paste.matches(c, m) {
+            let text = self.clipboard.clone();
+            if !text.is_empty() {
+                let vp = self.editor.viewport.max(1);
+                let vw = self.editor.viewport_w.max(1);
+                self.editor.delete_selection();
+                if let Some(b) = self.editor.active_buffer_mut() {
+                    if !b.is_readonly() {
+                        b.insert_text(&text);
+                        b.ensure_cursor_visible(vp, vw);
+                    }
+                }
+            }
+            return;
+        }
+        if km.undo.matches(c, m) {
+            let (vp, vw) = (self.editor.viewport.max(1), self.editor.viewport_w.max(1));
+            if let Some(b) = self.editor.active_buffer_mut() {
+                if b.undo() {
+                    b.ensure_cursor_visible(vp, vw);
+                }
+            }
+            return;
+        }
+        if km.redo.matches(c, m) {
+            let (vp, vw) = (self.editor.viewport.max(1), self.editor.viewport_w.max(1));
+            if let Some(b) = self.editor.active_buffer_mut() {
+                if b.redo() {
+                    b.ensure_cursor_visible(vp, vw);
+                }
             }
             return;
         }
@@ -1491,8 +1528,8 @@ impl App {
                     KeyCode::Down => b.move_down(1),
                     KeyCode::PageUp => b.move_up(vp),
                     KeyCode::PageDown => b.move_down(vp),
-                    KeyCode::Left if ctrl => b.move_word_left(),
-                    KeyCode::Right if ctrl => b.move_word_right(),
+                    KeyCode::Left if ctrl || alt => b.move_word_left(),
+                    KeyCode::Right if ctrl || alt => b.move_word_right(),
                     KeyCode::Left => b.move_left(),
                     KeyCode::Right => b.move_right(),
                     KeyCode::Home => b.set_cursor(0, 0),
@@ -1559,7 +1596,7 @@ impl App {
                     b.insert_str("    ");
                     edited = true;
                 }
-                KeyCode::Backspace if ctrl => {
+                KeyCode::Backspace if ctrl || alt => {
                     b.delete_word_back();
                     edited = true;
                 }
@@ -1571,11 +1608,11 @@ impl App {
                     b.delete();
                     edited = true;
                 }
-                KeyCode::Left if ctrl => {
+                KeyCode::Left if ctrl || alt => {
                     b.move_word_left();
                     edited = true;
                 }
-                KeyCode::Right if ctrl => {
+                KeyCode::Right if ctrl || alt => {
                     b.move_word_right();
                     edited = true;
                 }

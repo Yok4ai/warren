@@ -82,8 +82,9 @@ Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell 
 `claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
 Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel
 divider and the content↔strip divider are draggable.
-Editor: arrows + word motion (ctrl+←/→, ctrl+backspace), home/end = file top/bottom, click-to-
-place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c` copy, paste, select-replace.
+Editor: arrows + word motion (ctrl/alt+←/→, ctrl/alt+backspace), home/end = file top/bottom,
+click-to-place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c`/`ctrl+v` copy/
+paste (in-app clipboard + OSC52), `ctrl+z`/`ctrl+y` undo/redo.
 
 ## Deferred (future)
 

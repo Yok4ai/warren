@@ -109,6 +109,10 @@ pub struct Keymap {
     pub prev_tab: KeyChord,
     pub close_tab: KeyChord,
     pub save: KeyChord,
+    pub copy: KeyChord,
+    pub paste: KeyChord,
+    pub undo: KeyChord,
+    pub redo: KeyChord,
     pub new_file: KeyChord,
     pub toggle_scrollbar: KeyChord,
     pub select_all: KeyChord,
@@ -133,6 +137,10 @@ impl Default for Keymap {
             prev_tab: KeyChord::new(PageUp, ctrl),
             close_tab: KeyChord::new(Char('x'), ctrl),
             save: KeyChord::new(Char('s'), ctrl),
+            copy: KeyChord::new(Char('c'), ctrl),
+            paste: KeyChord::new(Char('v'), ctrl),
+            undo: KeyChord::new(Char('z'), ctrl),
+            redo: KeyChord::new(Char('y'), ctrl),
             new_file: KeyChord::new(Char('n'), ctrl),
             toggle_scrollbar: KeyChord::new(Char('s'), KeyModifiers::ALT),
             select_all: KeyChord::new(Char('a'), ctrl),
@@ -152,6 +160,10 @@ impl Keymap {
             ("Close tab", self.close_tab),
             ("Next / prev tab", self.next_tab),
             ("Select all", self.select_all),
+            ("Copy", self.copy),
+            ("Paste", self.paste),
+            ("Undo", self.undo),
+            ("Redo", self.redo),
             ("Cycle focus", self.focus_next),
             ("Toggle sidebar", self.toggle_sidebar),
             ("Toggle editor", self.toggle_editor),
@@ -184,6 +196,10 @@ impl Keymap {
                 "prev_tab" => self.prev_tab = chord,
                 "close_tab" => self.close_tab = chord,
                 "save" => self.save = chord,
+                "copy" => self.copy = chord,
+                "paste" => self.paste = chord,
+                "undo" => self.undo = chord,
+                "redo" => self.redo = chord,
                 "new_file" => self.new_file = chord,
                 "toggle_scrollbar" => self.toggle_scrollbar = chord,
                 "select_all" => self.select_all = chord,
@@ -234,6 +250,10 @@ next_tab = \"ctrl+pagedown\"
 prev_tab = \"ctrl+pageup\"
 close_tab = \"ctrl+x\"
 save = \"ctrl+s\"
+copy = \"ctrl+c\"
+paste = \"ctrl+v\"
+undo = \"ctrl+z\"
+redo = \"ctrl+y\"
 new_file = \"ctrl+n\"
 toggle_scrollbar = \"alt+s\"
 select_all = \"ctrl+a\"
