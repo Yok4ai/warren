@@ -1,0 +1,48 @@
+
+Built with **Rust + ratatui**. The full design and phase plan live in
+`~/.claude/plans/i-want-you-to-ancient-sunbeam.md`; current status is in `TASKS.md`.
+
+## Build / run / lint
+
+```bash
+cargo run --release            # run warren in the current directory
+cargo run --release -- /path   # open a specific folder
+cargo clippy                   # lint (keep it clean — zero warnings)
+cargo build --release          # optimized build
+```
+
+Always test with `--release`: debug builds make full-screen TUI redraws noticeably laggy.
+warren is an interactive TUI, so it can't be driven headlessly — it needs a real terminal
+(`enable_raw_mode` fails without a TTY). Manual run + eyeballing is the verification loop.
+
+Built with **Rust + ratatui**. The full design and phase plan live in
+`~/.claude/plans/i-want-you-to-ancient-sunbeam.md`; current status is in `TASKS.md`.
+
+## Build / run / lint
+
+```bash
+cargo run --release            # run warren in the current directory
+cargo run --release -- /path   # open a specific folder
+cargo clippy                   # lint (keep it clean — zero warnings)
+cargo build --release          # optimized build
+```
+
+Always test with `--release`: debug builds make full-screen TUI redraws noticeably laggy.
+warren is an interactive TUI, so it can't be driven headlessly — it needs a real terminal
+(`enable_raw_mode` fails without a TTY). Manual run + eyeballing is the verification loop.
+
+Built with **Rust + ratatui**. The full design and phase plan live in
+`~/.claude/plans/i-want-you-to-ancient-sunbeam.md`; current status is in `TASKS.md`.
+
+## Build / run / lint
+
+```bash
+cargo run --release            # run warren in the current directory
+cargo run --release -- /path   # open a specific folder
+cargo clippy                   # lint (keep it clean — zero warnings)
+cargo build --release          # optimized build
+```
+
+Always test with `--release`: debug builds make full-screen TUI redraws noticeably laggy.
+warren is an interactive TUI, so it can't be driven headlessly — it needs a real terminal
+(`enable_raw_mode` fails without a TTY). Manual run + eyeballing is the verification loop.

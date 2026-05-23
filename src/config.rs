@@ -106,6 +106,12 @@ pub struct Keymap {
     pub next_tab: KeyChord,
     pub prev_tab: KeyChord,
     pub close_tab: KeyChord,
+    pub save: KeyChord,
+    pub new_file: KeyChord,
+    pub toggle_scrollbar: KeyChord,
+    pub select_all: KeyChord,
+    pub toggle_autosave: KeyChord,
+    pub help: KeyChord,
 }
 
 impl Default for Keymap {
@@ -121,11 +127,36 @@ impl Default for Keymap {
             next_tab: KeyChord::new(PageDown, ctrl),
             prev_tab: KeyChord::new(PageUp, ctrl),
             close_tab: KeyChord::new(Char('x'), ctrl),
+            save: KeyChord::new(Char('s'), ctrl),
+            new_file: KeyChord::new(Char('n'), ctrl),
+            toggle_scrollbar: KeyChord::new(Char('s'), KeyModifiers::ALT),
+            select_all: KeyChord::new(Char('a'), ctrl),
+            toggle_autosave: KeyChord::new(Char('a'), KeyModifiers::ALT),
+            help: KeyChord::new(F(1), KeyModifiers::NONE),
         }
     }
 }
 
 impl Keymap {
+    /// All bindings as `(label, chord)` for the help overlay / discoverability.
+    pub fn bindings(&self) -> Vec<(&'static str, KeyChord)> {
+        vec![
+            ("New file", self.new_file),
+            ("Save", self.save),
+            ("Close tab", self.close_tab),
+            ("Next / prev tab", self.next_tab),
+            ("Select all", self.select_all),
+            ("Cycle focus", self.focus_next),
+            ("Toggle sidebar", self.toggle_sidebar),
+            ("Toggle scrollbar", self.toggle_scrollbar),
+            ("Toggle auto-save", self.toggle_autosave),
+            ("Command palette", self.command_palette),
+            ("Open Claude pane", self.open_claude),
+            ("Help", self.help),
+            ("Quit", self.quit),
+        ]
+    }
+
     /// Overlay string overrides (action -> chord) onto the defaults; bad entries are ignored.
     fn apply(&mut self, overrides: &HashMap<String, String>) {
         for (action, chord) in overrides {
@@ -141,6 +172,12 @@ impl Keymap {
                 "next_tab" => self.next_tab = chord,
                 "prev_tab" => self.prev_tab = chord,
                 "close_tab" => self.close_tab = chord,
+                "save" => self.save = chord,
+                "new_file" => self.new_file = chord,
+                "toggle_scrollbar" => self.toggle_scrollbar = chord,
+                "select_all" => self.select_all = chord,
+                "toggle_autosave" => self.toggle_autosave = chord,
+                "help" => self.help = chord,
                 _ => {}
             }
         }
@@ -171,6 +208,12 @@ focus_next = \"ctrl+w\"
 next_tab = \"ctrl+pagedown\"
 prev_tab = \"ctrl+pageup\"
 close_tab = \"ctrl+x\"
+save = \"ctrl+s\"
+new_file = \"ctrl+n\"
+toggle_scrollbar = \"alt+s\"
+select_all = \"ctrl+a\"
+toggle_autosave = \"alt+a\"
+help = \"f1\"
 ";
 
 fn config_path() -> Option<PathBuf> {

@@ -3,10 +3,14 @@
 use std::io::{self, Stdout};
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -17,7 +21,19 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// before propagating the panic (so a crash never leaves the user's shell garbled).
 pub fn init() -> Result<Tui> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+    // Disambiguate keys like Ctrl+Backspace / Ctrl+Enter where the terminal supports it.
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
@@ -26,7 +42,15 @@ pub fn init() -> Result<Tui> {
 
 /// Restore the terminal to its original state. Safe to call more than once.
 pub fn restore() -> Result<()> {
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     disable_raw_mode()?;
     Ok(())
 }
