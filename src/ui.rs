@@ -17,14 +17,42 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
-    if app.sidebar_visible {
-        let [side, edit] =
+    let content = if app.sidebar_visible {
+        let [side, rest] =
             Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
                 .areas(main);
         draw_sidebar(frame, app, side);
-        draw_editor(frame, app, edit);
+        rest
     } else {
-        draw_editor(frame, app, main);
+        main
+    };
+
+    let show_editor = app.editor_visible;
+    let show_panel = app.panel.visible && !app.panel.is_empty();
+    app.editor_area = Rect::default();
+    app.terminal_area = Rect::default();
+    match (show_editor, show_panel) {
+        (true, true) => {
+            let term_pct = app.term_ratio;
+            let [edit, term] = Layout::horizontal([
+                Constraint::Percentage(100 - term_pct),
+                Constraint::Percentage(term_pct),
+            ])
+            .areas(content);
+            app.editor_area = edit;
+            app.terminal_area = term;
+            draw_editor(frame, app, edit);
+            draw_panel(frame, app, term);
+        }
+        (true, false) => {
+            app.editor_area = content;
+            draw_editor(frame, app, content);
+        }
+        (false, true) => {
+            app.terminal_area = content;
+            draw_panel(frame, app, content);
+        }
+        (false, false) => draw_all_hidden(frame, app, content),
     }
     draw_status(frame, app, status);
 
@@ -39,6 +67,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(frame, app, frame.area());
     }
+    if app.dragging {
+        draw_drag_label(frame, app, frame.area());
+    }
+}
+
+/// A small floating tag that follows the cursor while dragging a file from the explorer.
+fn draw_drag_label(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(path) = app.drag_source.as_ref() else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let label = format!(" {name} ");
+    let w = (label.chars().count() as u16).min(area.width);
+    let x = (app.drag_pos.0 + 1).min(area.width.saturating_sub(w));
+    let y = app.drag_pos.1.min(area.height.saturating_sub(1));
+    let rect = Rect::new(x, y, w, 1);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default().bg(DARK.accent).fg(Color::Black).bold(),
+        ))),
+        rect,
+    );
 }
 
 /// A centered overlay listing every keybinding.
@@ -215,13 +270,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.editor.tabs.is_empty() {
         app.editor.viewport = 0;
         let km = &app.config.keymap;
-        let hint_line = |chord: String, label: &str| {
-            Line::from(vec![
-                Span::styled(chord, Style::default().fg(DARK.accent).bold()),
-                Span::styled(format!("  {label}"), Style::default().fg(DARK.dim)),
-            ])
-        };
-        let hint = Paragraph::new(vec![
+        let header = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
                 "No file open",
@@ -232,12 +281,37 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                 "Pick a file in the explorer and press Enter, or:",
                 Style::default().fg(DARK.dim),
             )),
-            Line::from(""),
-            hint_line(km.new_file.to_string(), "new file"),
-            hint_line(km.help.to_string(), "all keybindings"),
         ])
         .alignment(Alignment::Center);
-        frame.render_widget(hint, inner);
+
+        // Right-align chords into a column, bullet, then left-aligned labels.
+        let hint = |chord: String, label: &str| {
+            Line::from(vec![
+                Span::styled(format!("{chord:>6}"), Style::default().fg(DARK.accent).bold()),
+                Span::styled(format!("  • {label}"), Style::default().fg(DARK.dim)),
+            ])
+        };
+        let hints = Paragraph::new(vec![
+            hint(km.new_file.to_string(), "new file"),
+            hint(km.new_terminal.to_string(), "new terminal"),
+            hint(km.close_tab.to_string(), "close tab / terminal"),
+            hint(km.toggle_panel.to_string(), "toggle terminal panel"),
+            hint(km.toggle_sidebar.to_string(), "toggle sidebar"),
+            hint(km.toggle_editor.to_string(), "toggle editor"),
+            hint(km.help.to_string(), "all keybindings"),
+        ]);
+
+        let [htop, hbot] =
+            Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas(inner);
+        frame.render_widget(header, htop);
+        // Center the aligned hint block as a fixed-width column.
+        let [_, mid, _] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(32),
+            Constraint::Min(0),
+        ])
+        .areas(hbot);
+        frame.render_widget(hints, mid);
         return;
     }
 
@@ -281,19 +355,38 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), tabbar);
 
     app.editor.viewport = content.height as usize;
-    let (total, scroll) = app
+    let (total, scroll, cursor_line) = app
         .editor
         .active_buffer()
-        .map(|b| (b.lines.len(), b.scroll))
-        .unwrap_or((0, 0));
-    // Reserve the rightmost column for the scrollbar when it's shown.
-    let show_sb = app.show_scrollbar && total > content.height as usize && content.width > 1;
+        .map(|b| (b.lines.len(), b.scroll, b.cursor.0))
+        .unwrap_or((0, 0, 0));
+
+    // Line-number gutter on the left.
+    let digits = total.max(1).to_string().len() as u16;
+    let [gutter, body] =
+        Layout::horizontal([Constraint::Length(digits + 1), Constraint::Min(0)]).areas(content);
+
+    // Reserve the rightmost column of the body for the scrollbar when shown.
+    let show_sb = app.show_scrollbar && total > body.height as usize && body.width > 1;
     let text_area = if show_sb {
-        Rect::new(content.x, content.y, content.width - 1, content.height)
+        Rect::new(body.x, body.y, body.width - 1, body.height)
     } else {
-        content
+        body
     };
     app.editor.content_area = text_area;
+
+    let dw = digits as usize;
+    let nums: Vec<Line> = (scroll..(scroll + text_area.height as usize).min(total))
+        .map(|i| {
+            let style = if i == cursor_line && focused {
+                Style::default().fg(DARK.accent)
+            } else {
+                Style::default().fg(DARK.dim)
+            };
+            Line::from(Span::styled(format!("{:>dw$} ", i + 1), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(nums), gutter);
 
     if let Some(buf) = app.editor.active_buffer() {
         let start = buf.scroll.min(total.saturating_sub(1));
@@ -303,25 +396,34 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     draw_selection(frame, app, text_area);
 
-    // Show the cursor when the editor is focused and the cursor line is visible.
-    if app.focus == Focus::Editor {
-        if let Some(buf) = app.editor.active_buffer() {
-            let (cl, cc) = buf.cursor;
-            if cl >= buf.scroll && cl < buf.scroll + text_area.height as usize {
+    // Block cursor: blinking accent when focused, dim static otherwise. Drawn ourselves (rather
+    // than the hardware cursor) so the blink is uniform with the terminal pane.
+    if let Some(buf) = app.editor.active_buffer() {
+        let (cl, cc) = buf.cursor;
+        if cl >= buf.scroll && cl < buf.scroll + text_area.height as usize {
+            let show = if focused { app.blink_on } else { true };
+            if show {
                 let y = text_area.y + (cl - buf.scroll) as u16;
                 let x = text_area.x + (cc as u16).min(text_area.width.saturating_sub(1));
-                frame.set_cursor_position((x, y));
+                let style = if focused {
+                    Style::default().bg(DARK.accent).fg(Color::Black)
+                } else {
+                    Style::default().bg(DARK.dim).fg(Color::Black)
+                };
+                frame
+                    .buffer_mut()
+                    .set_style(Rect::new(x, y, 1, 1), style);
             }
         }
     }
 
     app.editor.scrollbar_col = if show_sb {
-        Some(content.x + content.width - 1)
+        Some(body.x + body.width - 1)
     } else {
         None
     };
     if show_sb {
-        draw_scrollbar(frame, content, total, scroll);
+        draw_scrollbar(frame, body, total, scroll);
     }
 }
 
@@ -388,6 +490,107 @@ fn draw_selection(frame: &mut Frame, app: &App, content: Rect) {
     }
 }
 
+/// Placeholder shown when both the editor and the terminal panel are hidden.
+fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
+    let km = &app.config.keymap;
+    let hint = |chord: String, label: &str| {
+        Line::from(vec![
+            Span::styled(chord, Style::default().fg(DARK.accent).bold()),
+            Span::styled(format!("  {label}"), Style::default().fg(DARK.dim)),
+        ])
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DARK.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "All panes hidden",
+                Style::default().fg(DARK.fg).bold(),
+            )),
+            Line::from(""),
+            hint(km.toggle_editor.to_string(), "show editor"),
+            hint(km.toggle_panel.to_string(), "show terminal panel"),
+            hint(km.toggle_sidebar.to_string(), "show sidebar"),
+        ])
+        .alignment(Alignment::Center),
+        inner,
+    );
+}
+
+fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::Terminal;
+    let bc = border_color(focused);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(bc));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split: terminal content on the left, a draggable vertical tab strip on the right.
+    let strip_w = app
+        .panel_strip_w
+        .clamp(4, inner.width.saturating_sub(8).max(4));
+    let [content, tabcol] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(strip_w)]).areas(inner);
+    let tabblock = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(bc));
+    let strip = tabblock.inner(tabcol);
+    frame.render_widget(tabblock, tabcol);
+
+    app.panel.content_area = content;
+    app.panel.tablist_area = strip;
+    app.panel_divider_col = tabcol.x;
+    app.panel_inner_right = inner.x + inner.width;
+
+    let active = app.panel.active;
+    let w = strip.width as usize;
+    let avail = w.saturating_sub(2);
+    let mut lines: Vec<Line> = app
+        .panel
+        .terms
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let label: String = format!(" {}", t.name).chars().take(avail).collect();
+            let (name_style, x_style) = if i == active {
+                let s = Style::default().bg(DARK.accent).fg(Color::Black);
+                (s, s)
+            } else {
+                (
+                    Style::default().fg(DARK.fg),
+                    Style::default().fg(DARK.dim),
+                )
+            };
+            Line::from(vec![
+                Span::styled(format!("{label:<avail$}"), name_style),
+                Span::styled("✕ ", x_style),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(
+        format!("{:<w$}", " + new"),
+        Style::default().fg(DARK.accent),
+    )));
+    frame.render_widget(Paragraph::new(lines), strip);
+
+    let blink = app.blink_on;
+    if let Some(t) = app.panel.active_mut() {
+        t.resize(content.height, content.width);
+        let parser = t.lock();
+        // Cursor blinks (via visibility) when the panel is focused; hidden otherwise.
+        let cursor = tui_term::widget::Cursor::default()
+            .visibility(focused && blink)
+            .overlay_style(Style::default().bg(DARK.accent).fg(Color::Black));
+        let term = tui_term::widget::PseudoTerminal::new(parser.screen()).cursor(cursor);
+        frame.render_widget(term, content);
+    }
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let km = &app.config.keymap;
     let bg = Style::default().bg(DARK.status_bg).fg(DARK.status_fg);
@@ -395,6 +598,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let focus = match app.focus {
         Focus::Sidebar => "EXPLORER",
         Focus::Editor => "EDITOR",
+        Focus::Terminal => "CLAUDE",
     };
     let left = Line::from(vec![
         Span::styled(format!(" {focus} "), bg.fg(DARK.accent).bold()),

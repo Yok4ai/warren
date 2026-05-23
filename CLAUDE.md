@@ -59,10 +59,14 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 
 ## Default keybindings
 
-`ctrl+q` quit · `ctrl+p` palette (todo) · `ctrl+b` toggle sidebar · `ctrl+j` claude pane (todo)
-· `ctrl+w` cycle focus · `ctrl+n` new file · `ctrl+s` save · `ctrl+x` close tab
-· `ctrl+pageup/pagedown` prev/next tab · `alt+s` toggle scrollbar · `alt+a` toggle auto-save
-· `f1` keybindings overlay.
+`ctrl+q` quit · `ctrl+p` palette (todo) · `ctrl+b` toggle sidebar · `alt+e` toggle editor
+· `ctrl+w` cycle focus
+· `ctrl+n` new file · `ctrl+s` save · `ctrl+x` close tab · `ctrl+pageup/pagedown` prev/next tab
+· `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `f1` keybindings overlay.
+Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run
+`claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
+Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel
+divider and the content↔strip divider are draggable.
 Editor: arrows + word motion (ctrl+←/→, ctrl+backspace), home/end = file top/bottom, click-to-
 place-cursor, drag-select (auto-scrolls), `ctrl+a` select all, `ctrl+c` copy, paste, select-replace.
 

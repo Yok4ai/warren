@@ -17,12 +17,15 @@ Phased build of the TUI IDE. Design doc: `~/.claude/plans/i-want-you-to-ancient-
       per-tab close buttons, draggable pane divider, custom scrollbar (grab-drag, no click-jump).
       Selection delete/replace, paste (bracketed), select-all (`ctrl+a`), auto-save (`alt+a`),
       Home/End = file top/bottom, close-confirm (save/discard/cancel), help overlay (`f1`).
+- [x] **Phase 5 — Terminal panel + flexible panes (headline).** Editor↔panel split (draggable);
+      VS Code-style terminal panel with multiple generic terminals (`ctrl+t` new, `ctrl+\`` toggle),
+      a draggable vertical tab strip (click/✕/"+ new", smallest-free numbering). Run `claude`/`npm`
+      in any terminal. Pane visibility toggles: sidebar (`ctrl+b`), editor (`alt+e`), panel.
+      Focus cycling, mouse forwarding, bracketed paste. Drag-and-drop from explorer → terminal
+      (inserts path) or editor (opens). Blinking cursor (editor + terminal). Editor line numbers.
 
 ## Next
 
-- [ ] **Phase 5 — Splits + Claude pane (headline).** Recursive split-tree layout
-      (split/resize/close/focus-nav). Fold the Phase-0 PTY code into a reusable terminal pane.
-      Embed `claude` on demand (`ctrl+j`).
 - [ ] **Phase 4 — Command palette.** `ctrl+p` fuzzy file finder + command list (nucleo).
       Reuses `prompt.rs`'s input. Also enables Save As / quick-open.
 - [ ] **Phase 6 — Git.** `git2` status/stage/commit/push/pull/diff + SCM sidebar + commit graph.

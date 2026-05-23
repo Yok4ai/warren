@@ -16,6 +16,10 @@ pub enum AppEvent {
     Input(CtEvent),
     /// One or more paths changed on disk (from the filesystem watcher).
     FsChanged(Vec<PathBuf>),
+    /// The embedded terminal produced output (its screen changed).
+    PtyChanged,
+    /// The embedded terminal's child process exited.
+    PtyExited,
     /// Redraw cadence. Rendering is gated on a dirty flag so idle ticks are cheap.
     Tick,
 }

@@ -101,7 +101,8 @@ pub struct Keymap {
     pub quit: KeyChord,
     pub command_palette: KeyChord,
     pub toggle_sidebar: KeyChord,
-    pub open_claude: KeyChord,
+    pub toggle_editor: KeyChord,
+    pub new_terminal: KeyChord,
     pub focus_next: KeyChord,
     pub next_tab: KeyChord,
     pub prev_tab: KeyChord,
@@ -111,6 +112,7 @@ pub struct Keymap {
     pub toggle_scrollbar: KeyChord,
     pub select_all: KeyChord,
     pub toggle_autosave: KeyChord,
+    pub toggle_panel: KeyChord,
     pub help: KeyChord,
 }
 
@@ -122,7 +124,8 @@ impl Default for Keymap {
             quit: KeyChord::new(Char('q'), ctrl),
             command_palette: KeyChord::new(Char('p'), ctrl),
             toggle_sidebar: KeyChord::new(Char('b'), ctrl),
-            open_claude: KeyChord::new(Char('j'), ctrl),
+            toggle_editor: KeyChord::new(Char('e'), KeyModifiers::ALT),
+            new_terminal: KeyChord::new(Char('t'), ctrl),
             focus_next: KeyChord::new(Char('w'), ctrl),
             next_tab: KeyChord::new(PageDown, ctrl),
             prev_tab: KeyChord::new(PageUp, ctrl),
@@ -132,6 +135,7 @@ impl Default for Keymap {
             toggle_scrollbar: KeyChord::new(Char('s'), KeyModifiers::ALT),
             select_all: KeyChord::new(Char('a'), ctrl),
             toggle_autosave: KeyChord::new(Char('a'), KeyModifiers::ALT),
+            toggle_panel: KeyChord::new(Char('`'), ctrl),
             help: KeyChord::new(F(1), KeyModifiers::NONE),
         }
     }
@@ -148,10 +152,12 @@ impl Keymap {
             ("Select all", self.select_all),
             ("Cycle focus", self.focus_next),
             ("Toggle sidebar", self.toggle_sidebar),
+            ("Toggle editor", self.toggle_editor),
             ("Toggle scrollbar", self.toggle_scrollbar),
             ("Toggle auto-save", self.toggle_autosave),
             ("Command palette", self.command_palette),
-            ("Open Claude pane", self.open_claude),
+            ("New terminal", self.new_terminal),
+            ("Toggle terminal panel", self.toggle_panel),
             ("Help", self.help),
             ("Quit", self.quit),
         ]
@@ -167,7 +173,8 @@ impl Keymap {
                 "quit" => self.quit = chord,
                 "command_palette" => self.command_palette = chord,
                 "toggle_sidebar" => self.toggle_sidebar = chord,
-                "open_claude" => self.open_claude = chord,
+                "toggle_editor" => self.toggle_editor = chord,
+                "new_terminal" => self.new_terminal = chord,
                 "focus_next" => self.focus_next = chord,
                 "next_tab" => self.next_tab = chord,
                 "prev_tab" => self.prev_tab = chord,
@@ -177,6 +184,7 @@ impl Keymap {
                 "toggle_scrollbar" => self.toggle_scrollbar = chord,
                 "select_all" => self.select_all = chord,
                 "toggle_autosave" => self.toggle_autosave = chord,
+                "toggle_panel" => self.toggle_panel = chord,
                 "help" => self.help = chord,
                 _ => {}
             }
@@ -203,7 +211,8 @@ const DEFAULT_CONFIG: &str = "\
 quit = \"ctrl+q\"
 command_palette = \"ctrl+p\"
 toggle_sidebar = \"ctrl+b\"
-open_claude = \"ctrl+j\"
+toggle_editor = \"alt+e\"
+new_terminal = \"ctrl+t\"
 focus_next = \"ctrl+w\"
 next_tab = \"ctrl+pagedown\"
 prev_tab = \"ctrl+pageup\"
@@ -213,6 +222,7 @@ new_file = \"ctrl+n\"
 toggle_scrollbar = \"alt+s\"
 select_all = \"ctrl+a\"
 toggle_autosave = \"alt+a\"
+toggle_panel = \"ctrl+`\"
 help = \"f1\"
 ";
 

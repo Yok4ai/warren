@@ -1,7 +1,7 @@
 //! Application state and the central run loop.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -9,13 +9,15 @@ use crossterm::event::{
     MouseEventKind,
 };
 use notify::RecommendedWatcher;
-use tokio::sync::mpsc;
+use ratatui::layout::Rect;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::config::Config;
 use crate::editor::Editor;
 use crate::event::{self, AppEvent};
 use crate::explorer::FileTree;
 use crate::prompt::{Prompt, PromptKind};
+use crate::terminal::{Panel, TerminalPane};
 use crate::tui::Tui;
 use crate::{ui, watcher};
 
@@ -24,6 +26,7 @@ use crate::{ui, watcher};
 pub enum Focus {
     Sidebar,
     Editor,
+    Terminal,
 }
 
 /// Global application state. The run loop owns this and is the only writer.
@@ -34,6 +37,7 @@ pub struct App {
     pub editor: Editor,
     pub focus: Focus,
     pub sidebar_visible: bool,
+    pub editor_visible: bool,
     /// Sidebar width in columns (draggable).
     pub sidebar_width: u16,
     /// True while dragging the sidebar/editor divider.
@@ -54,6 +58,32 @@ pub struct App {
     pub close_confirm: Option<usize>,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
+    /// Current cursor-blink phase (on/off), and when blinking started.
+    pub blink_on: bool,
+    blink_start: Instant,
+    /// Drag-and-drop from the explorer: the path being dragged, whether a real drag is underway,
+    /// and the current mouse position (for the floating label).
+    pub drag_source: Option<PathBuf>,
+    pub dragging: bool,
+    pub drag_pos: (u16, u16),
+    /// The terminal panel (multiple terminals with a vertical tab strip).
+    pub panel: Panel,
+    /// Percentage of the editor/panel split given to the panel (right side).
+    pub term_ratio: u16,
+    /// Width (columns) of the panel's vertical tab strip, including its border (draggable).
+    pub panel_strip_w: u16,
+    /// True while dragging the editor/panel divider.
+    resizing_term: bool,
+    /// True while dragging the terminal-content / tab-strip divider.
+    resizing_strip: bool,
+    /// Per-frame geometry of the tab-strip divider (set by the renderer).
+    pub panel_divider_col: u16,
+    pub panel_inner_right: u16,
+    /// Per-frame geometry for mouse mapping (set by the renderer).
+    pub editor_area: Rect,
+    pub terminal_area: Rect,
+    /// Funnel sender, kept so panes spawned later can push events.
+    tx: Option<UnboundedSender<AppEvent>>,
     pub status: String,
     should_quit: bool,
     needs_redraw: bool,
@@ -83,6 +113,7 @@ impl App {
             editor: Editor::default(),
             focus: Focus::Sidebar,
             sidebar_visible: true,
+            editor_visible: true,
             sidebar_width: 32,
             resizing: false,
             dragging_scrollbar: false,
@@ -93,6 +124,21 @@ impl App {
             prompt: None,
             close_confirm: None,
             show_help: false,
+            blink_on: true,
+            blink_start: Instant::now(),
+            drag_source: None,
+            dragging: false,
+            drag_pos: (0, 0),
+            panel: Panel::default(),
+            term_ratio: 50,
+            panel_strip_w: 10,
+            resizing_term: false,
+            resizing_strip: false,
+            panel_divider_col: 0,
+            panel_inner_right: 0,
+            editor_area: Rect::default(),
+            terminal_area: Rect::default(),
+            tx: None,
             status: "ready".into(),
             should_quit: false,
             needs_redraw: true,
@@ -107,7 +153,8 @@ impl App {
         let (tx, mut rx) = mpsc::unbounded_channel();
         event::spawn_input(tx.clone());
         event::spawn_ticks(tx.clone());
-        self._watcher = watcher::spawn(&self.workspace, tx);
+        self._watcher = watcher::spawn(&self.workspace, tx.clone());
+        self.tx = Some(tx);
 
         // Rendering is driven by the tick only: input/fs events mutate state and mark the UI
         // dirty, and each tick paints at most one frame. This coalesces bursts so holding a key
@@ -149,6 +196,12 @@ impl App {
             self.status = "auto-saved".into();
             self.needs_redraw = true;
         }
+        // Drive the cursor blink (~530ms), forcing a redraw when the phase flips.
+        let phase = (self.blink_start.elapsed().as_millis() / 530) % 2 == 0;
+        if phase != self.blink_on {
+            self.blink_on = phase;
+            self.needs_redraw = true;
+        }
     }
 
     fn draw(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -167,6 +220,15 @@ impl App {
                 self.tree_dirty = true;
                 self.changed_paths.extend(paths);
             }
+            AppEvent::PtyChanged => self.needs_redraw = true,
+            AppEvent::PtyExited => {
+                if self.panel.prune_exited() {
+                    if self.panel.terms.is_empty() && self.focus == Focus::Terminal {
+                        self.focus = Focus::Editor;
+                    }
+                    self.needs_redraw = true;
+                }
+            }
             AppEvent::Tick => {} // handled in run loop's render step
         }
     }
@@ -176,6 +238,13 @@ impl App {
         if let Some(p) = &mut self.prompt {
             for ch in text.chars().filter(|c| *c != '\n' && *c != '\r') {
                 p.insert_char(ch);
+            }
+            self.needs_redraw = true;
+            return;
+        }
+        if self.focus == Focus::Terminal {
+            if let Some(t) = self.panel.active_mut() {
+                t.send_paste(&text);
             }
             self.needs_redraw = true;
             return;
@@ -193,47 +262,71 @@ impl App {
 
     fn on_mouse(&mut self, m: MouseEvent) {
         let in_sidebar = self.sidebar_visible && m.column < self.sidebar_width;
-        // The draggable divider sits on the seam between the sidebar and editor borders.
-        let on_divider = self.sidebar_visible
+        let on_sidebar_divider = self.sidebar_visible
             && (self.sidebar_width.saturating_sub(1)..=self.sidebar_width).contains(&m.column);
+        let term_open = self.panel.visible && !self.panel.is_empty();
+        let in_terminal = term_open && rect_contains(self.terminal_area, m.column, m.row);
+        let on_term_divider = term_open
+            && self.editor_visible
+            && (self.terminal_area.x.saturating_sub(1)..=self.terminal_area.x).contains(&m.column)
+            && (self.terminal_area.y..self.terminal_area.y + self.terminal_area.height)
+                .contains(&m.row);
+        let on_strip_divider = term_open
+            && (self.panel_divider_col.saturating_sub(1)..=self.panel_divider_col)
+                .contains(&m.column)
+            && (self.terminal_area.y..self.terminal_area.y + self.terminal_area.height)
+                .contains(&m.row);
+
         match m.kind {
-            MouseEventKind::ScrollDown => {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let down = matches!(m.kind, MouseEventKind::ScrollDown);
                 if in_sidebar {
-                    self.tree.move_down();
-                } else {
+                    if down {
+                        self.tree.move_down();
+                    } else {
+                        self.tree.move_up();
+                    }
+                } else if in_terminal {
+                    self.forward_terminal_mouse(&m);
+                } else if down {
                     self.editor.scroll_down(3);
-                }
-                self.needs_redraw = true;
-            }
-            MouseEventKind::ScrollUp => {
-                if in_sidebar {
-                    self.tree.move_up();
                 } else {
                     self.editor.scroll_up(3);
                 }
                 self.needs_redraw = true;
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.on_scrollbar(&m) {
-                    // Grab the thumb without jumping; only dragging scrolls.
+                if on_strip_divider {
+                    self.resizing_strip = true;
+                } else if on_term_divider {
+                    self.resizing_term = true;
+                } else if !in_terminal && self.on_scrollbar(&m) {
                     self.dragging_scrollbar = true;
                     self.scrollbar_grab = self.scrollbar_grab_offset(m.row);
-                } else if on_divider {
+                } else if on_sidebar_divider {
                     self.resizing = true;
                 } else if in_sidebar {
                     self.focus = Focus::Sidebar;
-                    // Row 0 is the top border, so the first item is at row 1.
                     if m.row >= 1 {
                         let idx = self.tree.scroll + (m.row as usize - 1);
                         if idx < self.tree.rows.len() {
                             self.tree.selected = idx;
-                            self.activate_selected();
+                            // Record a potential drag; a plain click (no move) activates on release.
+                            self.drag_source = Some(self.tree.rows[idx].path.clone());
+                            self.dragging = false;
+                            self.drag_pos = (m.column, m.row);
                         }
                     }
-                } else {
+                } else if in_terminal {
+                    self.focus = Focus::Terminal;
+                    if rect_contains(self.panel.tablist_area, m.column, m.row) {
+                        self.handle_tablist_click(m.column, m.row);
+                    } else {
+                        self.forward_terminal_mouse(&m);
+                    }
+                } else if self.editor_visible {
                     self.focus = Focus::Editor;
                     if m.row == self.editor.tabbar_row {
-                        // A click on a tab's ✕ closes it; elsewhere on a tab switches to it.
                         if let Some(&(_, _, idx)) = self
                             .editor
                             .close_hitboxes
@@ -251,7 +344,6 @@ impl App {
                             self.editor.clear_selection();
                         }
                     } else if let Some((line, col)) = self.editor_coords(&m) {
-                        // Click places the cursor and begins a (possibly empty) selection.
                         if let Some(b) = self.editor.active_buffer_mut() {
                             b.set_cursor(line, col);
                         }
@@ -263,14 +355,24 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.dragging_scrollbar {
+                if self.drag_source.is_some() {
+                    // Dragging a file out of the explorer.
+                    self.dragging = true;
+                    self.drag_pos = (m.column, m.row);
+                } else if self.dragging_scrollbar {
                     self.scroll_bar_to(m.row);
                 } else if self.resizing {
                     let max = self.term_width.saturating_sub(15).max(15);
                     self.sidebar_width = m.column.clamp(15, max);
+                } else if self.resizing_term {
+                    self.resize_term_to(m.column);
+                } else if self.resizing_strip {
+                    // Strip grows toward the left as the divider moves left.
+                    let w = self.panel_inner_right.saturating_sub(m.column);
+                    self.panel_strip_w = w.clamp(5, 40);
+                } else if in_terminal {
+                    self.forward_terminal_mouse(&m);
                 } else if self.editor.selection.is_some() {
-                    // Auto-scroll when the drag passes above/below the content area, so the
-                    // selection can extend beyond what's currently visible.
                     let ca = self.editor.content_area;
                     if ca.height > 0 {
                         if m.row >= ca.y + ca.height {
@@ -286,10 +388,24 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.dragging_scrollbar {
+                if let Some(path) = self.drag_source.take() {
+                    if self.dragging {
+                        self.handle_drop(&path, m.column, m.row);
+                    } else {
+                        // No movement: treat as a click (open file / toggle folder).
+                        self.activate_selected();
+                    }
+                    self.dragging = false;
+                } else if self.dragging_scrollbar {
                     self.dragging_scrollbar = false;
                 } else if self.resizing {
                     self.resizing = false;
+                } else if self.resizing_term {
+                    self.resizing_term = false;
+                } else if self.resizing_strip {
+                    self.resizing_strip = false;
+                } else if in_terminal {
+                    self.forward_terminal_mouse(&m);
                 } else if let Some(text) = self.editor.selected_text() {
                     let n = text.chars().count();
                     copy_to_clipboard(&text);
@@ -301,6 +417,62 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Forward a mouse event to the active terminal, relative to its content area.
+    fn forward_terminal_mouse(&mut self, m: &MouseEvent) {
+        let inner = self.panel.content_area;
+        if inner.width == 0
+            || inner.height == 0
+            || m.column < inner.x
+            || m.column >= inner.x + inner.width
+            || m.row < inner.y
+            || m.row >= inner.y + inner.height
+        {
+            return;
+        }
+        let col = m.column - inner.x + 1;
+        let row = m.row - inner.y + 1;
+        if let Some(t) = self.panel.active_mut() {
+            t.send_mouse(m.kind, col, row);
+        }
+    }
+
+    /// Handle a click in the vertical tab strip: select a terminal, close it (✕ at the right
+    /// edge), or add a new one (the "+ new" row below the terminals).
+    fn handle_tablist_click(&mut self, col: u16, row: u16) {
+        let strip = self.panel.tablist_area;
+        let idx = (row - strip.y) as usize;
+        let count = self.panel.terms.len();
+        match idx.cmp(&count) {
+            // The "+ new" row, just past the terminals.
+            std::cmp::Ordering::Equal => self.spawn_terminal(),
+            // A terminal row: the last two columns are the ✕ close button.
+            std::cmp::Ordering::Less => {
+                if col >= strip.x + strip.width.saturating_sub(2) {
+                    self.panel.close(idx);
+                    if self.panel.is_empty() {
+                        self.focus = Focus::Editor;
+                    }
+                } else {
+                    self.panel.active = idx;
+                }
+            }
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+
+    /// Adjust the editor/terminal split from the divider column.
+    fn resize_term_to(&mut self, col: u16) {
+        let rest_x = if self.sidebar_visible {
+            self.sidebar_width
+        } else {
+            0
+        };
+        let rest_w = self.term_width.saturating_sub(rest_x).max(1) as i32;
+        let term_w = (self.term_width as i32 - col as i32).max(0);
+        let ratio = (term_w * 100 / rest_w).clamp(15, 85);
+        self.term_ratio = ratio as u16;
     }
 
     /// Map a mouse position to `(line, column)` in the active buffer, or `None` if it's outside
@@ -395,6 +567,7 @@ impl App {
         if let Some(path) = self.tree.activate() {
             match self.editor.open(&path) {
                 Ok(()) => {
+                    self.editor_visible = true; // opening a file reveals a hidden editor
                     self.focus = Focus::Editor;
                     self.status = path.display().to_string();
                 }
@@ -408,6 +581,9 @@ impl App {
             return;
         }
         self.needs_redraw = true;
+        // Restart the blink so the cursor is solid right after a keystroke.
+        self.blink_start = Instant::now();
+        self.blink_on = true;
         // The help overlay is dismissed by any of Help/Esc and swallows other keys.
         if self.show_help {
             if key.code == KeyCode::Esc
@@ -426,12 +602,19 @@ impl App {
             self.handle_prompt(key);
             return;
         }
+        // When the terminal is focused, almost everything is forwarded to Claude, so it does
+        // NOT go through the global shortcut handler (only a few warren keys are reserved).
+        if self.focus == Focus::Terminal {
+            self.handle_terminal(key);
+            return;
+        }
         if self.handle_global(key) {
             return;
         }
         match self.focus {
             Focus::Sidebar => self.handle_sidebar(key),
             Focus::Editor => self.handle_editor(key),
+            Focus::Terminal => {}
         }
     }
 
@@ -443,17 +626,18 @@ impl App {
             self.should_quit = true;
         } else if km.toggle_sidebar.matches(c, m) {
             self.sidebar_visible = !self.sidebar_visible;
-            if !self.sidebar_visible {
-                self.focus = Focus::Editor;
-            } else {
+            if !self.sidebar_visible && self.focus == Focus::Sidebar {
+                self.cycle_focus();
+            } else if self.sidebar_visible {
                 self.focus = Focus::Sidebar;
             }
+        } else if km.toggle_editor.matches(c, m) {
+            self.editor_visible = !self.editor_visible;
+            if !self.editor_visible && self.focus == Focus::Editor {
+                self.cycle_focus();
+            }
         } else if km.focus_next.matches(c, m) {
-            self.focus = match (self.focus, self.sidebar_visible) {
-                (Focus::Sidebar, _) => Focus::Editor,
-                (Focus::Editor, true) => Focus::Sidebar,
-                (Focus::Editor, false) => Focus::Editor,
-            };
+            self.cycle_focus();
         } else if km.new_file.matches(c, m) {
             self.open_new_file_prompt();
         } else if km.toggle_scrollbar.matches(c, m) {
@@ -469,12 +653,142 @@ impl App {
             self.show_help = true;
         } else if km.command_palette.matches(c, m) {
             self.status = "command palette: coming in Phase 4".into();
-        } else if km.open_claude.matches(c, m) {
-            self.status = "claude pane: coming in Phase 5".into();
+        } else if km.new_terminal.matches(c, m) || is_ctrl_tilde(c, m) {
+            self.spawn_terminal();
+        } else if km.toggle_panel.matches(c, m) {
+            self.toggle_panel();
         } else {
             return false;
         }
         true
+    }
+
+    /// Cycle focus across the visible panes: sidebar → editor → terminal (only those shown).
+    fn cycle_focus(&mut self) {
+        let mut order = Vec::new();
+        if self.sidebar_visible {
+            order.push(Focus::Sidebar);
+        }
+        if self.editor_visible {
+            order.push(Focus::Editor);
+        }
+        if self.panel.visible && !self.panel.is_empty() {
+            order.push(Focus::Terminal);
+        }
+        if order.is_empty() {
+            return;
+        }
+        let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        self.focus = order[(i + 1) % order.len()];
+    }
+
+    /// Spawn a new terminal (a shell) in the panel and focus it. Run `claude`, `npm`, etc. in it.
+    fn spawn_terminal(&mut self) {
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        // Reuse the smallest free number so closing terminals frees their label.
+        let mut n = 1;
+        while self.panel.terms.iter().any(|t| t.name == n.to_string()) {
+            n += 1;
+        }
+        let name = n.to_string();
+        // Size is provisional; the renderer resizes the PTY to its actual area next frame.
+        match TerminalPane::spawn(&shell, &name, &self.workspace, 24, 80, tx) {
+            Ok(pane) => {
+                self.panel.add(pane);
+                self.focus = Focus::Terminal;
+            }
+            Err(e) => self.status = format!("terminal failed: {e}"),
+        }
+    }
+
+    /// Toggle the terminal panel: focus it if hidden/unfocused (spawning a terminal if empty),
+    /// or hide it if it's already focused.
+    fn toggle_panel(&mut self) {
+        if self.panel.visible {
+            if self.focus == Focus::Terminal {
+                self.panel.visible = false;
+                self.focus = Focus::Editor;
+            } else {
+                self.focus = Focus::Terminal;
+            }
+        } else if self.panel.is_empty() {
+            self.spawn_terminal();
+        } else {
+            self.panel.visible = true;
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    /// Keys while the panel is focused: a few warren keys are reserved for managing the panel,
+    /// everything else is forwarded to the active terminal.
+    fn handle_terminal(&mut self, key: KeyEvent) {
+        let km = &self.config.keymap;
+        let (c, m) = (key.code, key.modifiers);
+        if km.quit.matches(c, m) {
+            self.should_quit = true;
+        } else if km.help.matches(c, m) {
+            self.show_help = true;
+        } else if km.focus_next.matches(c, m) {
+            self.cycle_focus();
+        } else if km.toggle_sidebar.matches(c, m) {
+            self.sidebar_visible = !self.sidebar_visible;
+        } else if km.toggle_editor.matches(c, m) {
+            self.editor_visible = !self.editor_visible;
+        } else if km.toggle_panel.matches(c, m) {
+            self.toggle_panel();
+        } else if km.new_terminal.matches(c, m) || is_ctrl_tilde(c, m) {
+            self.spawn_terminal();
+        } else if km.next_tab.matches(c, m) {
+            self.panel.next();
+        } else if km.prev_tab.matches(c, m) {
+            self.panel.prev();
+        } else if km.close_tab.matches(c, m) {
+            self.panel.close(self.panel.active);
+            if self.panel.is_empty() {
+                self.focus = Focus::Editor;
+            }
+        } else if let Some(t) = self.panel.active_mut() {
+            t.send_key(c, m);
+        }
+    }
+
+    /// Drop a dragged explorer path: onto a terminal inserts its (workspace-relative) path;
+    /// onto the editor opens the file.
+    fn handle_drop(&mut self, path: &Path, col: u16, row: u16) {
+        let term_open = self.panel.visible && !self.panel.is_empty();
+        if term_open && rect_contains(self.terminal_area, col, row) {
+            let text = self.drop_text(path);
+            if let Some(t) = self.panel.active_mut() {
+                t.send_paste(&text);
+            }
+            self.focus = Focus::Terminal;
+            self.status = format!("inserted {}", path.display());
+        } else if self.editor_visible && rect_contains(self.editor_area, col, row) && path.is_file()
+        {
+            match self.editor.open(path) {
+                Ok(()) => {
+                    self.editor_visible = true;
+                    self.focus = Focus::Editor;
+                    self.status = path.display().to_string();
+                }
+                Err(e) => self.status = format!("error: {e}"),
+            }
+        }
+    }
+
+    /// The text inserted when a path is dropped on a terminal: workspace-relative, quoted if it
+    /// contains spaces, with a trailing space.
+    fn drop_text(&self, path: &Path) -> String {
+        let rel = path.strip_prefix(&self.workspace).unwrap_or(path);
+        let s = rel.to_string_lossy();
+        if s.contains(' ') {
+            format!("\"{s}\" ")
+        } else {
+            format!("{s} ")
+        }
     }
 
     /// Open the new-file prompt, defaulting the target directory to the explorer selection
@@ -563,6 +877,7 @@ impl App {
                 }
                 match self.editor.open(&path) {
                     Ok(()) => {
+                        self.editor_visible = true;
                         self.focus = Focus::Editor;
                         self.status = format!("created {}", path.display());
                     }
@@ -771,6 +1086,15 @@ impl App {
             self.editor.clear_selection();
         }
     }
+}
+
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// Some terminals report Ctrl+Shift+` as Ctrl+~; accept it as the new-terminal chord too.
+fn is_ctrl_tilde(code: KeyCode, mods: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Char('~')) && mods.contains(KeyModifiers::CONTROL)
 }
 
 /// Copy text to the system clipboard via the OSC 52 terminal escape. Works in kitty (and most

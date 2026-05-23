@@ -7,6 +7,7 @@ mod event;
 mod explorer;
 mod highlight;
 mod prompt;
+mod terminal;
 mod theme;
 mod tui;
 mod ui;
