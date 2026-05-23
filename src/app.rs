@@ -166,6 +166,11 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("."));
         let tree = FileTree::new(workspace.clone());
         let git = Git::open(&workspace);
+        // Apply persisted UI state.
+        if let Some(t) = &config.theme {
+            crate::theme::set_by_name(t);
+        }
+        let solid_bg = config.solid_bg;
         Self {
             config,
             workspace,
@@ -196,7 +201,7 @@ impl App {
             scrollbar_grab: 0,
             show_scrollbar: true,
             auto_save: false,
-            solid_bg: false,
+            solid_bg,
             term_width: 80,
             prompt: None,
             close_confirm: None,
@@ -1148,6 +1153,11 @@ impl App {
         }
     }
 
+    /// Save theme + solid-background to state.toml so they persist across launches.
+    fn persist_ui_state(&self) {
+        crate::config::save_state(crate::theme::current().name, self.solid_bg);
+    }
+
     fn run_command(&mut self, cmd: Command) {
         match cmd {
             Command::NewFile => self.open_new_file_prompt(),
@@ -1189,13 +1199,16 @@ impl App {
                 } else {
                     "solid background: off".into()
                 };
+                self.persist_ui_state();
             }
             Command::CycleTheme => {
                 self.status = format!("theme: {}", crate::theme::cycle());
+                self.persist_ui_state();
             }
             Command::SetTheme(i) => {
                 crate::theme::set(i);
                 self.status = format!("theme: {}", crate::theme::current().name);
+                self.persist_ui_state();
             }
             Command::Help => self.show_help = true,
             Command::Quit => self.should_quit = true,

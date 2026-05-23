@@ -32,8 +32,9 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - `app.rs` — `App` global state and the run loop. `App` is the **only writer of state**.
   Key dispatch: modal `prompt` → global keys → focused component (`Sidebar` | `Editor`).
   Mouse handling (focus, click-to-select, divider resize, scrollbar drag, text selection).
-- `config.rs` — `KeyChord` parser + `Keymap`; loads `~/.config/warren/config.toml`
-  (written with defaults on first run).
+- `config.rs` — `KeyChord` parser + `Keymap`; loads `~/.config/warren/config.toml` (keymap +
+  `[settings]` defaults). Runtime UI choices (theme, solid_bg) persist to a separate
+  `state.toml` (so config.toml isn't clobbered); state overrides config settings on load.
 - `explorer.rs` — `FileTree`: lazily-expanded dir tree flattened to visible rows; owns its
   scroll offset so mouse clicks map to rows.
 - `editor.rs` — `Editor` (tabs) + rope-backed `Buffer` (cursor, edits, selection, save).

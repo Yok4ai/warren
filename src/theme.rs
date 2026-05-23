@@ -150,3 +150,13 @@ pub fn set(idx: usize) {
         CURRENT.store(idx, Ordering::Relaxed);
     }
 }
+
+/// Select a theme by (case-insensitive) name; returns whether it matched.
+pub fn set_by_name(name: &str) -> bool {
+    if let Some(i) = THEMES.iter().position(|t| t.name.eq_ignore_ascii_case(name)) {
+        CURRENT.store(i, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}

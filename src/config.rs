@@ -197,15 +197,26 @@ impl Keymap {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct SettingsFile {
+    theme: Option<String>,
+    solid_bg: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
     keys: HashMap<String, String>,
+    #[serde(default)]
+    settings: SettingsFile,
 }
 
 /// Top-level resolved configuration handed to the app.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub keymap: Keymap,
+    /// Persisted UI state.
+    pub theme: Option<String>,
+    pub solid_bg: bool,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -229,10 +240,31 @@ select_all = \"ctrl+a\"
 toggle_autosave = \"alt+a\"
 toggle_panel = \"ctrl+`\"
 help = \"f1\"
+
+# UI defaults (warren also persists runtime changes to state.toml).
+[settings]
+theme = \"Tokyo Night\"
+solid_bg = false
 ";
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("warren").join("config.toml"))
+}
+
+/// Runtime UI state lives here (separate from the user-edited config.toml).
+fn state_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("warren").join("state.toml"))
+}
+
+/// Persist the runtime UI choices (theme + solid background). Best-effort.
+pub fn save_state(theme: &str, solid_bg: bool) {
+    let Some(path) = state_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, format!("theme = \"{theme}\"\nsolid_bg = {solid_bg}\n"));
 }
 
 impl Config {
@@ -257,6 +289,22 @@ impl Config {
         };
 
         config.keymap.apply(&file.keys);
+        config.theme = file.settings.theme;
+        config.solid_bg = file.settings.solid_bg.unwrap_or(false);
+
+        // state.toml (written by warren on change) overrides config.toml settings.
+        if let Some(sp) = state_path() {
+            if let Ok(text) = std::fs::read_to_string(sp) {
+                if let Ok(state) = toml::from_str::<SettingsFile>(&text) {
+                    if state.theme.is_some() {
+                        config.theme = state.theme;
+                    }
+                    if let Some(b) = state.solid_bg {
+                        config.solid_bg = b;
+                    }
+                }
+            }
+        }
         config
     }
 }
