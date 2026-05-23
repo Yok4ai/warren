@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ropey::Rope;
+use syntect::parsing::SyntaxReference;
 
-use crate::highlight;
+use crate::highlight::{self, LineState};
 
 /// A text selection in buffer coordinates `(line, column)`, where column is a char index.
 #[derive(Clone, Copy)]
@@ -39,9 +40,14 @@ pub struct Buffer {
     pub name: String,
     /// Source of truth for the text.
     rope: Rope,
-    /// Cached highlighted lines for rendering; rebuilt when `highlight_dirty`.
+    /// Cached highlighted lines for rendering.
     pub lines: Vec<Line<'static>>,
-    highlight_dirty: bool,
+    /// syntect syntax for this buffer.
+    syntax: &'static SyntaxReference,
+    /// Per-line parse/highlight state for incremental re-highlighting.
+    hl_states: Vec<LineState>,
+    /// First line changed since the last re-highlight (None = clean).
+    dirty_from: Option<usize>,
     /// Cursor as `(line, char column)`.
     pub cursor: (usize, usize),
     /// Top visible line.
@@ -67,12 +73,16 @@ impl Buffer {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let rope = Rope::from_str(&text);
+        let syntax = highlight::syntax_for(path);
+        let (lines, hl_states) = highlight::full(syntax, &rope);
         Ok(Self {
-            lines: highlight::highlight_rope(path, &rope),
+            lines,
             path: path.to_path_buf(),
             name,
             rope,
-            highlight_dirty: false,
+            syntax,
+            hl_states,
+            dirty_from: None,
             cursor: (0, 0),
             scroll: 0,
             hscroll: 0,
@@ -89,8 +99,9 @@ impl Buffer {
     fn from_virtual(name: String, ext: &str, text: &str) -> Self {
         let rope = Rope::from_str(text);
         let path = PathBuf::from(format!("\u{0}{name}.{ext}"));
+        let syntax = highlight::syntax_for(&path);
         let is_diff = ext == "diff";
-        let lines = if is_diff {
+        let (lines, hl_states) = if is_diff {
             let mut v: Vec<Line<'static>> = rope
                 .lines()
                 .map(|l| {
@@ -104,16 +115,18 @@ impl Buffer {
             if v.is_empty() {
                 v.push(Line::raw(""));
             }
-            v
+            (v, Vec::new())
         } else {
-            highlight::highlight_rope(&path, &rope)
+            highlight::full(syntax, &rope)
         };
         Self {
             lines,
             path,
             name,
             rope,
-            highlight_dirty: false,
+            syntax,
+            hl_states,
+            dirty_from: None,
             cursor: (0, 0),
             scroll: 0,
             hscroll: 0,
@@ -164,16 +177,19 @@ impl Buffer {
         self.readonly
     }
 
-    fn touch(&mut self) {
+    /// Mark the buffer modified and record the earliest line that changed (for incremental
+    /// re-highlighting).
+    fn mark_dirty(&mut self, line: usize) {
         self.modified = true;
-        self.highlight_dirty = true;
         self.last_edit = Instant::now();
+        self.dirty_from = Some(self.dirty_from.map_or(line, |d| d.min(line)));
     }
 
     pub fn insert_char(&mut self, ch: char) {
         if self.readonly {
             return;
         }
+        let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert_char(idx, ch);
         if ch == '\n' {
@@ -181,18 +197,20 @@ impl Buffer {
         } else {
             self.cursor.1 += 1;
         }
-        self.touch();
+        self.mark_dirty(line);
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert(idx, s);
         self.cursor.1 += s.chars().count();
-        self.touch();
+        self.mark_dirty(line);
     }
 
     /// Insert possibly-multi-line text (e.g. a paste) at the cursor, advancing the cursor.
     pub fn insert_text(&mut self, s: &str) {
+        let line = self.cursor.0;
         let idx = self.cursor_char();
         self.rope.insert(idx, s);
         let newlines = s.matches('\n').count();
@@ -202,7 +220,7 @@ impl Buffer {
             let last = s.rsplit('\n').next().unwrap_or("");
             self.cursor = (self.cursor.0 + newlines, last.chars().count());
         }
-        self.touch();
+        self.mark_dirty(line);
     }
 
     /// Remove the character range from `(sl, sc)` to `(el, ec)` and place the cursor at the start.
@@ -212,7 +230,7 @@ impl Buffer {
         if start < end {
             self.rope.remove(start..end);
             self.cursor = (sl, sc);
-            self.touch();
+            self.mark_dirty(sl);
         }
     }
 
@@ -222,13 +240,13 @@ impl Buffer {
             let idx = self.cursor_char();
             self.rope.remove(idx - 1..idx);
             self.cursor.1 -= 1;
-            self.touch();
+            self.mark_dirty(l);
         } else if l > 0 {
             let prev_len = self.line_len(l - 1);
             let idx = self.rope.line_to_char(l); // start of line l == just after prev newline
             self.rope.remove(idx - 1..idx);
             self.cursor = (l - 1, prev_len);
-            self.touch();
+            self.mark_dirty(l - 1);
         }
     }
 
@@ -237,11 +255,11 @@ impl Buffer {
         let idx = self.cursor_char();
         if c < self.line_len(l) {
             self.rope.remove(idx..idx + 1);
-            self.touch();
+            self.mark_dirty(l);
         } else if l + 1 < self.rope.len_lines() {
             // At end of line: remove the newline to join the next line.
             self.rope.remove(idx..idx + 1);
-            self.touch();
+            self.mark_dirty(l);
         }
     }
 
@@ -329,7 +347,7 @@ impl Buffer {
         let line_start = self.rope.line_to_char(self.cursor.0);
         self.rope.remove(line_start + target..line_start + self.cursor.1);
         self.cursor.1 = target;
-        self.touch();
+        self.mark_dirty(self.cursor.0);
     }
 
     /// Place the cursor directly (used by clicks, Home/End); clamps to valid positions.
@@ -356,9 +374,14 @@ impl Buffer {
     }
 
     fn rehighlight(&mut self) {
-        if self.highlight_dirty {
-            self.lines = highlight::highlight_rope(&self.path, &self.rope);
-            self.highlight_dirty = false;
+        if let Some(from) = self.dirty_from.take() {
+            highlight::incremental(
+                self.syntax,
+                &mut self.lines,
+                &mut self.hl_states,
+                &self.rope,
+                from,
+            );
         }
     }
 
