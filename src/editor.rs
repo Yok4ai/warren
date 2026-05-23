@@ -229,7 +229,12 @@ impl Buffer {
         let line = cursor.0.min(last);
         self.cursor = (line, cursor.1.min(self.line_len(line)));
         self.modified = true;
-        self.dirty_from = Some(0);
+        // Undo/redo can change any line, so re-highlight the whole buffer (incremental
+        // convergence from line 0 would stop early and miss the changed line).
+        let (lines, states) = highlight::full(self.syntax, &self.rope);
+        self.lines = lines;
+        self.hl_states = states;
+        self.dirty_from = None;
     }
 
     pub fn insert_char(&mut self, ch: char) {
