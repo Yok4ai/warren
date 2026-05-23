@@ -40,6 +40,26 @@ impl FileTree {
         tree
     }
 
+    /// Expand the ancestor directories of `path` and select its row, so an open file is
+    /// highlighted in the tree. No-op if `path` isn't under the root (e.g. virtual buffers).
+    pub fn reveal(&mut self, path: &Path) {
+        if path.strip_prefix(&self.root).is_err() {
+            return;
+        }
+        let mut cur = path.parent();
+        while let Some(d) = cur {
+            if d == self.root {
+                break;
+            }
+            self.expanded.insert(d.to_path_buf());
+            cur = d.parent();
+        }
+        self.rebuild();
+        if let Some(i) = self.rows.iter().position(|r| r.path == path) {
+            self.selected = i;
+        }
+    }
+
     /// Adjust `scroll` so the selected row is visible within `height` rows.
     pub fn ensure_visible(&mut self, height: usize) {
         if height == 0 {

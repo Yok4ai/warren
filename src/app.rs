@@ -520,6 +520,7 @@ impl App {
                         {
                             self.editor.active = idx;
                             self.editor.clear_selection();
+                            self.reveal_active_in_tree();
                         }
                     } else if let Some((line, col)) = self.editor_coords(&m) {
                         if let Some(b) = self.editor.active_buffer_mut() {
@@ -897,6 +898,15 @@ impl App {
         let scroll = max - offset;
         let thumb_top = scroll * denom / max;
         row as i32 - ca.y as i32 - thumb_top as i32
+    }
+
+    /// Highlight the active editor tab's file in the explorer (expanding ancestors as needed).
+    /// No-op for virtual buffers (diffs), whose path isn't under the workspace root.
+    fn reveal_active_in_tree(&mut self) {
+        if let Some(path) = self.editor.active_buffer().map(|b| b.path.clone()) {
+            self.tree.reveal(&path);
+            self.tree.ensure_visible(self.tree.viewport);
+        }
     }
 
     /// Open the selected file, or expand/collapse the selected directory (shared by the
@@ -1929,10 +1939,12 @@ impl App {
         }
         if km.next_tab.matches(c, m) {
             self.editor.next_tab();
+            self.reveal_active_in_tree();
             return;
         }
         if km.prev_tab.matches(c, m) {
             self.editor.prev_tab();
+            self.reveal_active_in_tree();
             return;
         }
         if km.close_tab.matches(c, m) {

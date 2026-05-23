@@ -823,6 +823,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         let bufm = frame.buffer_mut();
         for i in 0..track {
             let on_thumb = i >= thumb_x && i < thumb_x + thumb;
+            // Full block for the thumb, matching the vertical scrollbar's thickness.
             let (sym, color) = if on_thumb {
                 ("█", dark().dim)
             } else {
