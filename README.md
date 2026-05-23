@@ -16,10 +16,10 @@
   <img src="https://raw.githubusercontent.com/Yok4ai/warren/master/images/warren.png?v=3" alt="warren" width="900">
 </p>
 
-warren wraps the `claude` CLI in a pane — it isn't another reimplemented agent. Around it
-sits a lightweight editor with syntax highlighting, a file explorer, multiple terminals, git, and
-**live accept/reject diffs** for the edits Claude proposes. The point: stop juggling separate
-windows for `claude`, `nvim`, `npm run dev`, and `git` — keep them all in one terminal.
+warren wraps the `claude` CLI in a pane — it isn't another reimplemented agent. Around it sits a
+lightweight editor with syntax highlighting, a file explorer, multiple terminals, git, and **live
+accept/reject diffs** for the edits Claude proposes. Your editor, AI assistant, terminals, and
+version control live together in a single terminal workspace — no window-switching.
 
 Built with Rust + [ratatui](https://ratatui.rs). Runs on Linux and macOS.
 
