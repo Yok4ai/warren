@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 use crate::prompt::{Prompt, PromptKind};
 use crate::terminal::{Panel, TerminalPane};
 use crate::tui::Tui;
-use crate::{ui, watcher};
+use crate::{ui, update, watcher};
 
 /// Which component currently receives key input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +286,8 @@ impl App {
             self.ide_port = Some(server.port);
             self._ide = Some(server);
         }
+        // Check GitHub for a newer release (and auto-apply it if enabled).
+        update::spawn_check(tx.clone(), self.config.auto_update);
         self.tx = Some(tx);
 
         // Rendering is driven by the tick only: input/fs events mutate state and mark the UI
@@ -374,6 +376,14 @@ impl App {
                 data,
             } => {
                 self.editor.set_loaded_image(&buffer, &source, &data);
+                self.needs_redraw = true;
+            }
+            AppEvent::UpdateAvailable(v) => {
+                self.status = format!("warren v{v} available — palette (ctrl+p): \"Update warren\"");
+                self.needs_redraw = true;
+            }
+            AppEvent::UpdateResult(msg) => {
+                self.status = msg;
                 self.needs_redraw = true;
             }
             AppEvent::PtyChanged => self.needs_redraw = true,
@@ -600,6 +610,28 @@ impl App {
                     }
                     if let Some((line, col)) = self.editor_coords_clamped(&m) {
                         self.editor.update_selection(line, col);
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                // Middle-click a tab to close it (editor document tabs, or terminal strip tabs).
+                if m.row == self.editor.tabbar_row {
+                    if let Some(&(_, _, idx)) = self
+                        .editor
+                        .tab_hitboxes
+                        .iter()
+                        .find(|(s, e, _)| m.column >= *s && m.column < *e)
+                    {
+                        self.request_close(idx);
+                    }
+                } else if rect_contains(self.panel.tablist_area, m.column, m.row) {
+                    let idx = (m.row - self.panel.tablist_area.y) as usize;
+                    if idx < self.panel.terms.len() {
+                        self.panel.close(idx);
+                        if self.panel.is_empty() {
+                            self.focus = Focus::Editor;
+                        }
                     }
                 }
                 self.needs_redraw = true;
@@ -1444,6 +1476,12 @@ impl App {
                 };
             }
             Command::TogglePreview => self.toggle_preview(),
+            Command::Update => {
+                if let Some(tx) = self.tx.clone() {
+                    update::spawn_apply(tx);
+                    self.status = "checking for updates…".into();
+                }
+            }
             Command::ToggleSolidBg => {
                 self.solid_bg = !self.solid_bg;
                 self.status = if self.solid_bg {

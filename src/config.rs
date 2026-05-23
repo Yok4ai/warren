@@ -224,6 +224,7 @@ impl Keymap {
 struct SettingsFile {
     theme: Option<String>,
     solid_bg: Option<bool>,
+    auto_update: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -241,6 +242,8 @@ pub struct Config {
     /// Persisted UI state.
     pub theme: Option<String>,
     pub solid_bg: bool,
+    /// Check GitHub for a newer release on startup and update in place.
+    pub auto_update: bool,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -275,6 +278,8 @@ help = \"f1\"
 [settings]
 theme = \"Tokyo Night\"
 solid_bg = true
+# Check GitHub for a newer release on startup and update warren in place.
+auto_update = true
 ";
 
 fn config_path() -> Option<PathBuf> {
@@ -321,6 +326,7 @@ impl Config {
         config.keymap.apply(&file.keys);
         config.theme = file.settings.theme;
         config.solid_bg = file.settings.solid_bg.unwrap_or(true);
+        config.auto_update = file.settings.auto_update.unwrap_or(true);
 
         // state.toml (written by warren on change) overrides config.toml settings.
         if let Some(sp) = state_path() {

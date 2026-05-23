@@ -582,9 +582,24 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Min(0),
             ])
             .areas(ba);
+            // Left-to-right shading across the block letters (accent → near-white), à la opencode.
+            let w = banner_w.max(1) as f32 - 1.0;
             let banner: Vec<Line> = BANNER
                 .iter()
-                .map(|l| Line::from(Span::styled(*l, Style::default().fg(dark().accent).bold())))
+                .map(|l| {
+                    let spans: Vec<Span> = l
+                        .chars()
+                        .enumerate()
+                        .map(|(i, ch)| {
+                            let f = (i as f32 / w).clamp(0.0, 1.0);
+                            Span::styled(
+                                ch.to_string(),
+                                Style::default().fg(shade(dark().accent, f)).bold(),
+                            )
+                        })
+                        .collect();
+                    Line::from(spans)
+                })
                 .collect();
             frame.render_widget(Paragraph::new(banner), bm);
         } else {
@@ -933,8 +948,9 @@ fn draw_markdown_preview(frame: &mut Frame, app: &mut App, content: Rect) {
         let visible: Vec<Line> = buf.preview_lines()[start..end].to_vec();
         frame.render_widget(Paragraph::new(visible), area);
 
-        // Overlay images whose reserved band fits entirely in the viewport (clipping a graphics
-        // protocol mid-scroll would distort it, so partially-scrolled images stay blank).
+        // Render each image at full size when its whole band is in view. The graphics library
+        // scales to fit its area (it can't clip a partial slice), so a partially-scrolled image
+        // would shrink to a corner — better to show it cleanly when fully visible.
         for img in buf.preview_images_mut() {
             let band = img.height as usize;
             if img.line >= start && img.line + band <= end {
@@ -953,6 +969,18 @@ fn draw_markdown_preview(frame: &mut Frame, app: &mut App, content: Rect) {
     if show_sb {
         draw_scrollbar(frame, content, total, scroll);
     }
+}
+
+/// Blend `color` toward white by fraction `f` (0 = unchanged, 1 = white) for banner shading.
+fn shade(color: Color, f: f32) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0x88, 0x88, 0x88),
+    };
+    // Ease toward white but keep the left side clearly tinted.
+    let t = (f * 0.75).clamp(0.0, 1.0);
+    let mix = |c: u8| (c as f32 + (255.0 - c as f32) * t).round() as u8;
+    Color::Rgb(mix(r), mix(g), mix(b))
 }
 
 fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, scroll: usize) {

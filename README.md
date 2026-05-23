@@ -76,6 +76,8 @@ reject, without leaving the editor.
 - **Multiple terminals**: vertical tab strip, 5000-line scrollback, drag-to-select + copy.
 - **Command palette** (`ctrl+p`): fuzzy file finder + command runner.
 - **Themes**: Tokyo Night / Glow, Catppuccin, Dracula, Gruvbox, Light; optional solid background.
+- **Self-update**: checks GitHub on startup and updates in place (toggle with the `auto_update`
+  setting, or run "Update warren" from the command palette).
 
 ## Keybindings
 
@@ -113,7 +115,8 @@ In a terminal pane: mouse-drag or `pageup`/`pagedown` scrolls the scrollback; dr
 
 warren reads `~/.config/warren/config.toml` for keybindings and `[settings]` defaults. Runtime UI
 choices (theme, solid background) persist to `~/.config/warren/state.toml`. Both are optional;
-warren ships sensible defaults and writes a starter config on first run.
+warren ships sensible defaults and writes a starter config on first run. Set `auto_update = false`
+under `[settings]` to disable startup update checks.
 
 ## How the Claude integration works
 

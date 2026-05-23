@@ -21,6 +21,7 @@ pub enum Command {
     TogglePreview,
     ToggleSolidBg,
     CycleTheme,
+    Update,
     SetTheme(usize),
     Help,
     Quit,
@@ -42,6 +43,7 @@ pub fn commands() -> Vec<(String, Command)> {
         ("Toggle markdown preview", TogglePreview),
         ("Toggle solid background", ToggleSolidBg),
         ("Cycle theme", CycleTheme),
+        ("Update warren", Update),
         ("Help", Help),
         ("Quit", Quit),
     ]

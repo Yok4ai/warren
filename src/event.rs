@@ -36,6 +36,10 @@ pub enum AppEvent {
         source: String,
         data: Vec<u8>,
     },
+    /// A newer release was found (the version string), but auto-update is off.
+    UpdateAvailable(String),
+    /// Result of a self-update attempt (a message to show in the status line).
+    UpdateResult(String),
     /// Redraw cadence. Rendering is gated on a dirty flag so idle ticks are cheap.
     Tick,
 }

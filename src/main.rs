@@ -15,6 +15,7 @@ mod prompt;
 mod terminal;
 mod theme;
 mod tui;
+mod update;
 mod ui;
 mod watcher;
 
