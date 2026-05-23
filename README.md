@@ -6,7 +6,7 @@ embedded `claude` pane, multiple terminals, git, and **live accept/reject diffs*
 Claude proposes — all in one terminal, so you never leave it to juggle separate windows.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Yok4ai/warren/master/images/warren.png" alt="warren" width="900">
+  <img src="https://raw.githubusercontent.com/Yok4ai/warren/master/images/warren.png?v=2" alt="warren" width="900">
 </p>
 
 Built with Rust + [ratatui](https://ratatui.rs). Runs on Linux and macOS.
