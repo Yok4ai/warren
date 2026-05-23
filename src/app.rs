@@ -127,6 +127,10 @@ pub struct App {
     /// Per-frame geometry for mouse mapping (set by the renderer).
     pub editor_area: Rect,
     pub terminal_area: Rect,
+    /// Editor horizontal scrollbar geometry (x, y, width, thumb, max_scroll) when shown.
+    pub editor_hbar: Option<(u16, u16, u16, usize, usize)>,
+    dragging_hbar: bool,
+    hbar_grab: i32,
     /// Funnel sender, kept so panes spawned later can push events.
     tx: Option<UnboundedSender<AppEvent>>,
     pub status: String,
@@ -196,6 +200,9 @@ impl App {
             panel_inner_right: 0,
             editor_area: Rect::default(),
             terminal_area: Rect::default(),
+            editor_hbar: None,
+            dragging_hbar: false,
+            hbar_grab: 0,
             tx: None,
             status: "ready".into(),
             should_quit: false,
@@ -396,7 +403,11 @@ impl App {
                     }
                 } else if self.editor_visible {
                     self.focus = Focus::Editor;
-                    if m.row == self.editor.tabbar_row {
+                    if self.on_hbar(&m) {
+                        // Grab the horizontal scrollbar without jumping.
+                        self.dragging_hbar = true;
+                        self.hbar_grab = self.hbar_grab_offset(m.column);
+                    } else if m.row == self.editor.tabbar_row {
                         if let Some(&(_, _, idx)) = self
                             .editor
                             .close_hitboxes
@@ -425,7 +436,9 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.dragging_sidebar_sb {
+                if self.dragging_hbar {
+                    self.hbar_to(m.column);
+                } else if self.dragging_sidebar_sb {
                     self.sidebar_sb_to(m.row);
                 } else if self.drag_source.is_some() {
                     // Dragging a file out of the explorer.
@@ -460,7 +473,9 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.dragging_sidebar_sb {
+                if self.dragging_hbar {
+                    self.dragging_hbar = false;
+                } else if self.dragging_sidebar_sb {
                     self.dragging_sidebar_sb = false;
                 } else if let Some(path) = self.drag_source.take() {
                     if self.dragging {
@@ -582,6 +597,41 @@ impl App {
         let line = (buf.scroll + (row - ca.y) as usize).min(buf.line_count().saturating_sub(1));
         let c = ((col - ca.x) as usize + buf.hscroll).min(buf.line_text(line).chars().count());
         Some((line, c))
+    }
+
+    fn on_hbar(&self, m: &MouseEvent) -> bool {
+        match self.editor_hbar {
+            Some((x, y, width, _, _)) => m.row == y && m.column >= x && m.column < x + width,
+            None => false,
+        }
+    }
+
+    /// Offset between a grab column and the horizontal thumb's left edge.
+    fn hbar_grab_offset(&self, col: u16) -> i32 {
+        let Some((x, _, width, thumb, max_scroll)) = self.editor_hbar else {
+            return 0;
+        };
+        let hscroll = self.editor.active_buffer().map(|b| b.hscroll).unwrap_or(0);
+        let denom = (width as usize).saturating_sub(thumb).max(1);
+        let thumb_x = if max_scroll > 0 {
+            hscroll * denom / max_scroll
+        } else {
+            0
+        };
+        col as i32 - x as i32 - thumb_x as i32
+    }
+
+    /// Set horizontal scroll from a drag column (thumb tracks the cursor via the grab offset).
+    fn hbar_to(&mut self, col: u16) {
+        let Some((x, _, width, thumb, max_scroll)) = self.editor_hbar else {
+            return;
+        };
+        let denom = (width as usize).saturating_sub(thumb).max(1);
+        let target = (col as i32 - x as i32 - self.hbar_grab).clamp(0, denom as i32) as usize;
+        let hscroll = target * max_scroll / denom;
+        if let Some(b) = self.editor.active_buffer_mut() {
+            b.hscroll = hscroll;
+        }
     }
 
     /// Whether a mouse event falls on the editor scrollbar column.

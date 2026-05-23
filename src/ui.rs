@@ -15,6 +15,7 @@ use crate::theme::DARK;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = frame.area().width;
+    app.editor_hbar = None;
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
@@ -606,15 +607,29 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let [gutter, body] =
         Layout::horizontal([Constraint::Length(digits + 1), Constraint::Min(0)]).areas(content);
 
-    // Reserve the rightmost column of the body for the scrollbar when shown.
+    // Reserve the rightmost column (vertical scrollbar) and bottom row (horizontal scrollbar).
     let show_sb = app.show_scrollbar && total > body.height as usize && body.width > 1;
-    let text_area = if show_sb {
-        Rect::new(body.x, body.y, body.width - 1, body.height)
-    } else {
-        body
-    };
+    let text_w = body.width.saturating_sub(u16::from(show_sb));
+    let hscroll = app.editor.active_buffer().map(|b| b.hscroll).unwrap_or(0);
+    // Widest line currently in view determines whether/how far we can scroll horizontally.
+    let max_w = app
+        .editor
+        .active_buffer()
+        .map(|b| {
+            let s = b.scroll.min(total.saturating_sub(1));
+            let e = (s + body.height as usize).min(total);
+            (s..e)
+                .map(|i| b.line_text(i).chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let show_hbar = app.show_scrollbar && max_w > text_w as usize && body.height > 1;
+    let text_h = body.height.saturating_sub(u16::from(show_hbar));
+    let text_area = Rect::new(body.x, body.y, text_w, text_h);
     app.editor.content_area = text_area;
-    app.editor.viewport_w = text_area.width as usize;
+    app.editor.viewport = text_h as usize;
+    app.editor.viewport_w = text_w as usize;
 
     let dw = digits as usize;
     let nums: Vec<Line> = (scroll..(scroll + text_area.height as usize).min(total))
@@ -692,7 +707,34 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
     if show_sb {
-        draw_scrollbar(frame, body, total, scroll);
+        // Vertical scrollbar spans only the text height (not the hbar corner).
+        draw_scrollbar(frame, Rect::new(body.x, body.y, body.width, text_h), total, scroll);
+    }
+
+    if show_hbar {
+        let y = body.y + text_h;
+        let track = text_w as usize;
+        let max_scroll = max_w.saturating_sub(track);
+        let thumb = (track * track / max_w.max(1)).clamp(1, track);
+        let denom = track.saturating_sub(thumb).max(1);
+        let thumb_x = if max_scroll > 0 {
+            hscroll * denom / max_scroll
+        } else {
+            0
+        };
+        let bufm = frame.buffer_mut();
+        for i in 0..track {
+            let on_thumb = i >= thumb_x && i < thumb_x + thumb;
+            let (sym, color) = if on_thumb {
+                ("█", DARK.dim)
+            } else {
+                ("─", DARK.border)
+            };
+            if let Some(cell) = bufm.cell_mut((body.x + i as u16, y)) {
+                cell.set_symbol(sym).set_fg(color);
+            }
+        }
+        app.editor_hbar = Some((body.x, y, text_w, thumb, max_scroll));
     }
 }
 
