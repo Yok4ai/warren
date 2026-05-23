@@ -34,6 +34,23 @@ impl Selection {
     }
 }
 
+/// One row of a full-file inline diff (VS Code style): a line carried over unchanged, removed
+/// from the old file, or added in the new one. `old`/`new` are 1-based line numbers in each side
+/// (the gutter shows both), `None` where that side has no line.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DiffKind {
+    Context,
+    Del,
+    Add,
+}
+
+#[derive(Clone, Copy)]
+pub struct DiffRow {
+    pub kind: DiffKind,
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
 /// One open file.
 pub struct Buffer {
     pub path: PathBuf,
@@ -62,6 +79,8 @@ pub struct Buffer {
     readonly: bool,
     /// A diff/patch buffer: rendered with green/red line backgrounds.
     pub is_diff: bool,
+    /// For a full-file inline diff, per-row kind + old/new line numbers (parallel to `lines`).
+    pub diff_rows: Option<Vec<DiffRow>>,
     /// Undo/redo snapshots of `(rope, cursor)`. Rope clones are cheap (structural sharing).
     undo: Vec<(Rope, (usize, usize))>,
     redo: Vec<(Rope, (usize, usize))>,
@@ -95,6 +114,7 @@ impl Buffer {
             last_edit: Instant::now(),
             readonly: false,
             is_diff: false,
+            diff_rows: None,
             undo: Vec::new(),
             redo: Vec::new(),
         })
@@ -141,6 +161,35 @@ impl Buffer {
             last_edit: Instant::now(),
             readonly: true,
             is_diff,
+            diff_rows: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    /// A read-only full-file inline diff: `text` is the interleaved old+new content (newlines
+    /// stripped per row), `rows` is the parallel per-row diff metadata, and `path` selects the
+    /// syntax so the code is highlighted normally (the add/del backgrounds layer on top).
+    fn from_diff(name: String, path: &Path, text: &str, rows: Vec<DiffRow>) -> Self {
+        let rope = Rope::from_str(text);
+        let syntax = highlight::syntax_for(path);
+        let (lines, hl_states) = highlight::full(syntax, &rope);
+        Self {
+            lines,
+            path: PathBuf::from(format!("\u{0}{name}")),
+            name,
+            rope,
+            syntax,
+            hl_states,
+            dirty_from: None,
+            cursor: (0, 0),
+            scroll: 0,
+            hscroll: 0,
+            modified: false,
+            last_edit: Instant::now(),
+            readonly: true,
+            is_diff: true,
+            diff_rows: Some(rows),
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -509,6 +558,20 @@ impl Editor {
     pub fn open_virtual(&mut self, name: String, ext: &str, text: &str) {
         self.selection = None;
         let buf = Buffer::from_virtual(name.clone(), ext, text);
+        if let Some(i) = self.tabs.iter().position(|b| b.name == name) {
+            self.tabs[i] = buf;
+            self.active = i;
+        } else {
+            self.tabs.push(buf);
+            self.active = self.tabs.len() - 1;
+        }
+    }
+
+    /// Open (or replace) a read-only full-file inline diff tab. `path` is the real file path
+    /// (drives syntax highlighting); `name` is the tab label.
+    pub fn open_diff_view(&mut self, name: String, path: &Path, text: &str, rows: Vec<DiffRow>) {
+        self.selection = None;
+        let buf = Buffer::from_diff(name.clone(), path, text, rows);
         if let Some(i) = self.tabs.iter().position(|b| b.name == name) {
             self.tabs[i] = buf;
             self.active = i;

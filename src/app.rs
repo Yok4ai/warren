@@ -15,12 +15,14 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::config::Config;
-use crate::editor::Editor;
+use crate::editor::{self, Editor};
 use crate::event::{self, AppEvent};
 use crate::explorer::FileTree;
 use crate::find::Search;
 use crate::git::{Change, Commit, Git};
+use crate::ide::{self, DiffDecision, IdeServer};
 use crate::palette::{self, Choice, Command, Palette};
+use tokio::sync::oneshot;
 use crate::prompt::{Prompt, PromptKind};
 use crate::terminal::{Panel, TerminalPane};
 use crate::tui::Tui;
@@ -54,6 +56,12 @@ pub enum ScmItem {
         path: String,
         code: char,
     },
+}
+
+/// A diff awaiting the user's accept/reject (from Claude via the IDE protocol).
+struct PendingDiff {
+    reply: oneshot::Sender<DiffDecision>,
+    new_contents: String,
 }
 
 /// Global application state. The run loop owns this and is the only writer.
@@ -146,6 +154,11 @@ pub struct App {
     pub editor_hbar: Option<(u16, u16, u16, usize, usize)>,
     dragging_hbar: bool,
     hbar_grab: i32,
+    /// IDE-integration server (impersonates the editor for Claude); held to keep it alive.
+    _ide: Option<IdeServer>,
+    ide_port: Option<u16>,
+    /// A diff Claude proposed, awaiting accept/reject.
+    pending_diff: Option<PendingDiff>,
     /// Funnel sender, kept so panes spawned later can push events.
     tx: Option<UnboundedSender<AppEvent>>,
     pub status: String,
@@ -231,6 +244,9 @@ impl App {
             editor_hbar: None,
             dragging_hbar: false,
             hbar_grab: 0,
+            _ide: None,
+            ide_port: None,
+            pending_diff: None,
             tx: None,
             status: "ready".into(),
             should_quit: false,
@@ -247,6 +263,11 @@ impl App {
         event::spawn_input(tx.clone());
         event::spawn_ticks(tx.clone());
         self._watcher = watcher::spawn(&self.workspace, tx.clone());
+        // Impersonate the IDE so Claude shows its edits as accept/reject diffs in warren.
+        if let Some(server) = ide::start(self.workspace.clone(), tx.clone()).await {
+            self.ide_port = Some(server.port);
+            self._ide = Some(server);
+        }
         self.tx = Some(tx);
 
         // Rendering is driven by the tick only: input/fs events mutate state and mark the UI
@@ -315,6 +336,19 @@ impl App {
             AppEvent::FsChanged(paths) => {
                 self.tree_dirty = true;
                 self.changed_paths.extend(paths);
+            }
+            AppEvent::OpenDiff {
+                path,
+                new_contents,
+                tab_name,
+                reply,
+            } => self.open_diff(path, new_contents, tab_name, reply),
+            AppEvent::CloseDiff => {
+                if let Some(pd) = self.pending_diff.take() {
+                    let _ = pd.reply.send(DiffDecision::Reject);
+                }
+                self.close_diff_tab();
+                self.needs_redraw = true;
             }
             AppEvent::PtyChanged => self.needs_redraw = true,
             AppEvent::PtyExited => {
@@ -736,6 +770,11 @@ impl App {
         // Restart the blink so the cursor is solid right after a keystroke.
         self.blink_start = Instant::now();
         self.blink_on = true;
+        // A pending Claude diff captures input (accept/reject/scroll).
+        if self.pending_diff.is_some() {
+            self.handle_pending_diff(key);
+            return;
+        }
         // The help overlay is dismissed by any of Help/Esc and swallows other keys.
         if self.show_help {
             if key.code == KeyCode::Esc
@@ -865,8 +904,14 @@ impl App {
             n += 1;
         }
         let name = n.to_string();
+        // Point any `claude` launched in this terminal at warren's IDE server.
+        let mut env = Vec::new();
+        if let Some(port) = self.ide_port {
+            env.push(("CLAUDE_CODE_SSE_PORT".to_string(), port.to_string()));
+            env.push(("ENABLE_IDE_INTEGRATION".to_string(), "true".to_string()));
+        }
         // Size is provisional; the renderer resizes the PTY to its actual area next frame.
-        match TerminalPane::spawn(&shell, &name, &self.workspace, 24, 80, tx) {
+        match TerminalPane::spawn(&shell, &name, &self.workspace, 24, 80, tx, &env) {
             Ok(pane) => {
                 self.panel.add(pane);
                 self.focus = Focus::Terminal;
@@ -1224,6 +1269,94 @@ impl App {
             }
             Command::Help => self.show_help = true,
             Command::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Show a proposed diff (old file on disk vs Claude's new contents) and await accept/reject.
+    fn open_diff(
+        &mut self,
+        path: String,
+        new_contents: String,
+        tab_name: String,
+        reply: oneshot::Sender<DiffDecision>,
+    ) {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let name = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(tab_name);
+        // Full-file inline diff: every line of the new file, with removed old lines interleaved
+        // where they were. Rows carry real old/new line numbers for a VS Code-style dual gutter.
+        let diff = similar::TextDiff::from_lines(&old, &new_contents);
+        let mut text = String::new();
+        let mut rows: Vec<editor::DiffRow> = Vec::new();
+        for change in diff.iter_all_changes() {
+            let kind = match change.tag() {
+                similar::ChangeTag::Equal => editor::DiffKind::Context,
+                similar::ChangeTag::Delete => editor::DiffKind::Del,
+                similar::ChangeTag::Insert => editor::DiffKind::Add,
+            };
+            rows.push(editor::DiffRow {
+                kind,
+                old: change.old_index().map(|i| i + 1),
+                new: change.new_index().map(|i| i + 1),
+            });
+            let line = change.value().trim_end_matches(['\n', '\r']);
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(line);
+        }
+        self.editor
+            .open_diff_view(format!("✎ {name}"), Path::new(&path), &text, rows);
+        self.editor_visible = true;
+        self.focus = Focus::Editor;
+        self.pending_diff = Some(PendingDiff {
+            reply,
+            new_contents,
+        });
+        self.status = "Claude wants to edit — ⏎ accept · Esc reject".into();
+        self.needs_redraw = true;
+    }
+
+    fn close_diff_tab(&mut self) {
+        if let Some(i) = self.editor.tabs.iter().position(|b| b.name.starts_with('✎')) {
+            self.editor.close_at(i);
+        }
+    }
+
+    fn resolve_diff(&mut self, accept: bool) {
+        if let Some(pd) = self.pending_diff.take() {
+            let decision = if accept {
+                DiffDecision::Accept(pd.new_contents)
+            } else {
+                DiffDecision::Reject
+            };
+            let _ = pd.reply.send(decision);
+            self.status = if accept { "accepted edit" } else { "rejected edit" }.into();
+            self.close_diff_tab();
+        }
+    }
+
+    fn handle_pending_diff(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => self.resolve_diff(true),
+            KeyCode::Esc | KeyCode::Char('n') => self.resolve_diff(false),
+            // Scroll the diff while deciding.
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                let vp = self.editor.viewport.max(1);
+                if let Some(b) = self.editor.active_buffer_mut() {
+                    match key.code {
+                        KeyCode::Up => b.move_up(1),
+                        KeyCode::Down => b.move_down(1),
+                        KeyCode::PageUp => b.move_up(vp),
+                        KeyCode::PageDown => b.move_down(vp),
+                        _ => {}
+                    }
+                    b.ensure_cursor_visible(vp, 1);
+                }
+            }
+            _ => {}
         }
     }
 

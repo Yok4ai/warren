@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event as CtEvent};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
-/// Everything the run loop reacts to. New variants (PtyOutput, GitRefreshed, …) get added
-/// here as later phases land.
-#[derive(Debug, Clone)]
+use crate::ide::DiffDecision;
+
+/// Everything the run loop reacts to.
 pub enum AppEvent {
     /// A terminal input event: key, mouse, paste, or resize.
     Input(CtEvent),
@@ -20,6 +21,15 @@ pub enum AppEvent {
     PtyChanged,
     /// The embedded terminal's child process exited.
     PtyExited,
+    /// Claude (via the IDE protocol) wants to show a diff for `path`; reply accept/reject.
+    OpenDiff {
+        path: String,
+        new_contents: String,
+        tab_name: String,
+        reply: oneshot::Sender<DiffDecision>,
+    },
+    /// Claude asked to close the diff tab(s).
+    CloseDiff,
     /// Redraw cadence. Rendering is gated on a dirty flag so idle ticks are cheap.
     Tick,
 }

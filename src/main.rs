@@ -8,6 +8,7 @@ mod explorer;
 mod find;
 mod git;
 mod highlight;
+mod ide;
 mod palette;
 mod prompt;
 mod terminal;

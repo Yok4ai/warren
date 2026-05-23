@@ -37,6 +37,7 @@ impl TerminalPane {
         rows: u16,
         cols: u16,
         tx: UnboundedSender<AppEvent>,
+        extra_env: &[(String, String)],
     ) -> Result<Self> {
         let pair = native_pty_system().openpty(PtySize {
             rows: rows.max(1),
@@ -52,6 +53,9 @@ impl TerminalPane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
 
         let mut child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);

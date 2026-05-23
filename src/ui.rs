@@ -11,6 +11,7 @@ use crate::prompt::Prompt;
 use ratatui::Frame;
 
 use crate::app::{App, Focus, ScmItem, SidebarMode};
+use crate::editor::DiffKind;
 use crate::find::Search;
 use crate::theme;
 
@@ -643,10 +644,26 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|b| (b.lines.len(), b.scroll, b.cursor.0))
         .unwrap_or((0, 0, 0));
 
-    // Line-number gutter on the left.
+    // Line-number gutter on the left. A full-file inline diff uses a dual gutter (old │ new);
+    // a normal buffer uses a single column of line numbers.
+    let diff_widths = app.editor.active_buffer().and_then(|b| {
+        b.diff_rows.as_ref().map(|rows| {
+            let max_old = rows.iter().filter_map(|r| r.old).max().unwrap_or(0);
+            let max_new = rows.iter().filter_map(|r| r.new).max().unwrap_or(0);
+            (
+                max_old.max(1).to_string().len() as u16,
+                max_new.max(1).to_string().len() as u16,
+            )
+        })
+    });
     let digits = total.max(1).to_string().len() as u16;
+    let gutter_w = match diff_widths {
+        // "<old> <new> " plus a leading space.
+        Some((ow, nw)) => ow + 1 + nw + 2,
+        None => digits + 1,
+    };
     let [gutter, body] =
-        Layout::horizontal([Constraint::Length(digits + 1), Constraint::Min(0)]).areas(content);
+        Layout::horizontal([Constraint::Length(gutter_w), Constraint::Min(0)]).areas(content);
 
     // Reserve the rightmost column (vertical scrollbar) and bottom row (horizontal scrollbar).
     let show_sb = app.show_scrollbar && total > body.height as usize && body.width > 1;
@@ -672,9 +689,37 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     app.editor.viewport = text_h as usize;
     app.editor.viewport_w = text_w as usize;
 
-    let dw = digits as usize;
-    let nums: Vec<Line> = (scroll..(scroll + text_area.height as usize).min(total))
-        .map(|i| {
+    let vis = scroll..(scroll + text_area.height as usize).min(total);
+    let nums: Vec<Line> = if let Some((ow, nw)) = diff_widths {
+        // Dual gutter: old line number (blank for added rows) │ new line number (blank for removed).
+        let rows = app
+            .editor
+            .active_buffer()
+            .and_then(|b| b.diff_rows.as_ref());
+        let (ow, nw) = (ow as usize, nw as usize);
+        vis.map(|i| {
+            let row = rows.and_then(|r| r.get(i));
+            let (kind, old, new) = row
+                .map(|r| (r.kind, r.old, r.new))
+                .unwrap_or((DiffKind::Context, None, None));
+            let fg = match kind {
+                DiffKind::Add => dark().diff_add_fg,
+                DiffKind::Del => dark().diff_del_fg,
+                DiffKind::Context => dark().dim,
+            };
+            let fmt = |n: Option<usize>, w: usize| match n {
+                Some(v) => format!("{v:>w$}"),
+                None => " ".repeat(w),
+            };
+            Line::from(Span::styled(
+                format!(" {} {} ", fmt(old, ow), fmt(new, nw)),
+                Style::default().fg(fg),
+            ))
+        })
+        .collect()
+    } else {
+        let dw = digits as usize;
+        vis.map(|i| {
             let style = if i == cursor_line && focused {
                 Style::default().fg(dark().accent)
             } else {
@@ -682,7 +727,8 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             Line::from(Span::styled(format!("{:>dw$} ", i + 1), style))
         })
-        .collect();
+        .collect()
+    };
     frame.render_widget(Paragraph::new(nums), gutter);
 
     if let Some(buf) = app.editor.active_buffer() {
@@ -695,22 +741,32 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    // Diff buffers: paint full-width green/red line backgrounds (added/removed).
+    // Diff buffers: paint full-width green/red line backgrounds (added/removed). For a full-file
+    // inline diff the per-row kind drives the background (so syntax-highlighted fg is preserved);
+    // older patch-style buffers fall back to keying off the leading +/- char.
     if let Some(buf) = app.editor.active_buffer() {
         if buf.is_diff {
             let start = buf.scroll.min(total.saturating_sub(1));
             let end = (start + text_area.height as usize).min(total);
             for li in start..end {
-                let style = match buf.line_text(li).chars().next() {
-                    Some('+') => Style::default().bg(dark().diff_add_bg).fg(dark().diff_add_fg),
-                    Some('-') => Style::default().bg(dark().diff_del_bg).fg(dark().diff_del_fg),
-                    Some('@') => Style::default().fg(dark().accent),
-                    _ => continue,
+                let bg = if let Some(rows) = &buf.diff_rows {
+                    match rows.get(li).map(|r| r.kind) {
+                        Some(DiffKind::Add) => Some(dark().diff_add_bg),
+                        Some(DiffKind::Del) => Some(dark().diff_del_bg),
+                        _ => None,
+                    }
+                } else {
+                    match buf.line_text(li).chars().next() {
+                        Some('+') => Some(dark().diff_add_bg),
+                        Some('-') => Some(dark().diff_del_bg),
+                        _ => None,
+                    }
                 };
+                let Some(bg) = bg else { continue };
                 let y = text_area.y + (li - buf.scroll) as u16;
                 frame
                     .buffer_mut()
-                    .set_style(Rect::new(text_area.x, y, text_area.width, 1), style);
+                    .set_style(Rect::new(text_area.x, y, text_area.width, 1), Style::default().bg(bg));
             }
         }
     }
