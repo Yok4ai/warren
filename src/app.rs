@@ -227,7 +227,7 @@ impl App {
             dragging_scrollbar: false,
             scrollbar_grab: 0,
             show_scrollbar: true,
-            auto_save: false,
+            auto_save: true,
             solid_bg,
             clipboard: String::new(),
             term_width: 80,

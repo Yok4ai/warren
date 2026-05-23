@@ -269,7 +269,7 @@ help = \"f1\"
 # UI defaults (warren also persists runtime changes to state.toml).
 [settings]
 theme = \"Tokyo Night\"
-solid_bg = false
+solid_bg = true
 ";
 
 fn config_path() -> Option<PathBuf> {
@@ -315,7 +315,7 @@ impl Config {
 
         config.keymap.apply(&file.keys);
         config.theme = file.settings.theme;
-        config.solid_bg = file.settings.solid_bg.unwrap_or(false);
+        config.solid_bg = file.settings.solid_bg.unwrap_or(true);
 
         // state.toml (written by warren on change) overrides config.toml settings.
         if let Some(sp) = state_path() {
