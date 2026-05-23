@@ -75,6 +75,13 @@ pub struct App {
     /// Flattened, currently-visible SCM rows (changes + commits + expanded files).
     pub scm_items: Vec<ScmItem>,
     pub scm_selected: usize,
+    /// Independent scroll offset (top line) for the SCM list.
+    pub scm_scroll: usize,
+    /// Line index per SCM item, the SCM viewport height, and total line count — set by the
+    /// renderer so keyboard nav can keep the selection visible.
+    pub scm_item_lines: Vec<usize>,
+    pub scm_viewport: usize,
+    pub scm_total_lines: usize,
     /// Screen-row → SCM item index, set by the renderer for click mapping.
     pub scm_rows: Vec<(u16, usize)>,
     /// Sidebar scrollbar geometry (column, top-row, height) when shown; for drag-to-scroll.
@@ -172,6 +179,10 @@ impl App {
             git_expanded: HashSet::new(),
             scm_items: Vec::new(),
             scm_selected: 0,
+            scm_scroll: 0,
+            scm_item_lines: Vec::new(),
+            scm_viewport: 0,
+            scm_total_lines: 0,
             scm_rows: Vec::new(),
             sidebar_sb: None,
             dragging_sidebar_sb: false,
@@ -353,11 +364,8 @@ impl App {
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 let down = matches!(m.kind, MouseEventKind::ScrollDown);
                 if in_sidebar {
-                    if down {
-                        self.tree.move_down();
-                    } else {
-                        self.tree.move_up();
-                    }
+                    // Scroll the view by an offset (don't move the selection).
+                    self.sidebar_scroll_by(if down { 3 } else { -3 });
                 } else if in_terminal {
                     self.forward_terminal_mouse(&m);
                 } else if down {
@@ -1175,14 +1183,18 @@ impl App {
 
     fn handle_sidebar(&mut self, key: KeyEvent) {
         match self.sidebar_mode {
-            SidebarMode::Explorer => match key.code {
-                KeyCode::Up => self.tree.move_up(),
-                KeyCode::Down => self.tree.move_down(),
-                KeyCode::Right => self.tree.expand(),
-                KeyCode::Left => self.tree.collapse(),
-                KeyCode::Enter => self.activate_selected(),
-                _ => {}
-            },
+            SidebarMode::Explorer => {
+                match key.code {
+                    KeyCode::Up => self.tree.move_up(),
+                    KeyCode::Down => self.tree.move_down(),
+                    KeyCode::Right => self.tree.expand(),
+                    KeyCode::Left => self.tree.collapse(),
+                    KeyCode::Enter => self.activate_selected(),
+                    _ => {}
+                }
+                let vp = self.tree.viewport;
+                self.tree.ensure_visible(vp);
+            }
             SidebarMode::SourceControl => self.handle_scm_keys(key),
         }
     }
@@ -1190,16 +1202,35 @@ impl App {
     fn handle_scm_keys(&mut self, key: KeyEvent) {
         let total = self.scm_items.len();
         match key.code {
-            KeyCode::Up => self.scm_selected = self.scm_selected.saturating_sub(1),
+            KeyCode::Up => {
+                self.scm_selected = self.scm_selected.saturating_sub(1);
+                self.scm_ensure_visible();
+            }
             KeyCode::Down => {
                 if self.scm_selected + 1 < total {
                     self.scm_selected += 1;
                 }
+                self.scm_ensure_visible();
             }
             KeyCode::Enter => self.scm_activate(),
             KeyCode::Char('s') => self.scm_stage_toggle(),
             KeyCode::Char('c') => self.prompt = Some(Prompt::commit()),
             _ => {}
+        }
+    }
+
+    /// Keep the selected SCM item within the visible window by adjusting `scm_scroll`.
+    fn scm_ensure_visible(&mut self) {
+        let h = self.scm_viewport;
+        if h == 0 {
+            return;
+        }
+        if let Some(&line) = self.scm_item_lines.get(self.scm_selected) {
+            if line < self.scm_scroll {
+                self.scm_scroll = line;
+            } else if line >= self.scm_scroll + h {
+                self.scm_scroll = line + 1 - h;
+            }
         }
     }
 
@@ -1312,28 +1343,39 @@ impl App {
         }
     }
 
-    /// Drag the sidebar scrollbar: move the selection to the proportional position (which scrolls
-    /// the view via the selection-follows logic).
+    /// Drag the sidebar scrollbar: set the scroll offset proportionally (selection untouched).
     fn sidebar_sb_to(&mut self, row: u16) {
         let Some((_, y, h)) = self.sidebar_sb else {
             return;
         };
-        if h <= 1 {
+        let height = h as usize;
+        if height <= 1 {
             return;
         }
         let frac = (row.saturating_sub(y)) as f32 / (h - 1) as f32;
         match self.sidebar_mode {
             SidebarMode::Explorer => {
-                let n = self.tree.rows.len();
-                if n > 0 {
-                    self.tree.selected = ((frac * (n - 1) as f32).round() as usize).min(n - 1);
-                }
+                let max = self.tree.rows.len().saturating_sub(height);
+                self.tree.scroll = ((frac * max as f32).round() as usize).min(max);
             }
             SidebarMode::SourceControl => {
-                let n = self.scm_items.len();
-                if n > 0 {
-                    self.scm_selected = ((frac * (n - 1) as f32).round() as usize).min(n - 1);
-                }
+                let max = self.scm_total_lines.saturating_sub(height);
+                self.scm_scroll = ((frac * max as f32).round() as usize).min(max);
+            }
+        }
+    }
+
+    /// Wheel-scroll the sidebar view by `delta` rows (offset only, selection untouched).
+    fn sidebar_scroll_by(&mut self, delta: i32) {
+        match self.sidebar_mode {
+            SidebarMode::Explorer => {
+                let max = self.tree.rows.len().saturating_sub(self.tree.viewport);
+                self.tree.scroll =
+                    (self.tree.scroll as i32 + delta).clamp(0, max as i32) as usize;
+            }
+            SidebarMode::SourceControl => {
+                let max = self.scm_total_lines.saturating_sub(self.scm_viewport);
+                self.scm_scroll = (self.scm_scroll as i32 + delta).clamp(0, max as i32) as usize;
             }
         }
     }

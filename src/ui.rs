@@ -379,14 +379,19 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
         inner
     };
 
-    // Scroll so the selected item stays visible.
+    // Independent scroll offset (selection only nudges it via scm_ensure_visible on key nav).
     let h = content.height as usize;
-    let sel_line = item_line
-        .iter()
-        .find(|(_, item)| *item == app.scm_selected)
-        .map(|(li, _)| *li)
-        .unwrap_or(0);
-    let off = if sel_line >= h { sel_line + 1 - h } else { 0 };
+    app.scm_viewport = h;
+    app.scm_total_lines = total;
+    let mut item_lines = vec![0usize; app.scm_items.len()];
+    for (line, item) in &item_line {
+        if *item < item_lines.len() {
+            item_lines[*item] = *line;
+        }
+    }
+    app.scm_item_lines = item_lines;
+    app.scm_scroll = app.scm_scroll.min(total.saturating_sub(h));
+    let off = app.scm_scroll;
 
     app.scm_rows = item_line
         .iter()
@@ -452,7 +457,10 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let height = content.height as usize;
     let width = content.width as usize;
-    app.tree.ensure_visible(height);
+    // Independent scroll offset (clamped); keyboard nav adjusts it via ensure_visible.
+    app.tree.viewport = height;
+    let max = total.saturating_sub(height);
+    app.tree.scroll = app.tree.scroll.min(max);
     let scroll = app.tree.scroll;
 
     let lines: Vec<Line> = app

@@ -22,6 +22,8 @@ pub struct FileTree {
     /// Index of the first visible row; we own this (rather than a List widget) so mouse clicks
     /// can be mapped back to rows.
     pub scroll: usize,
+    /// Last rendered height, so keyboard navigation can keep the selection visible.
+    pub viewport: usize,
 }
 
 impl FileTree {
@@ -32,6 +34,7 @@ impl FileTree {
             rows: Vec::new(),
             selected: 0,
             scroll: 0,
+            viewport: 0,
         };
         tree.rebuild();
         tree
