@@ -1,7 +1,7 @@
 <h1 align="center">warren</h1>
 
 <p align="center">
-  <b>A terminal IDE that wraps the real <a href="https://claude.com/claude-code">Claude Code</a> CLI.</b><br>
+  <b>A terminal IDE that wraps the <a href="https://claude.com/claude-code">Claude Code</a> CLI.</b><br>
   File explorer · editor · embedded <code>claude</code> · terminals · git — all in one terminal.
 </p>
 
@@ -16,7 +16,7 @@
   <img src="https://raw.githubusercontent.com/Yok4ai/warren/master/images/warren.png?v=3" alt="warren" width="900">
 </p>
 
-warren wraps the **real** `claude` CLI in a pane — it isn't another reimplemented agent. Around it
+warren wraps the `claude` CLI in a pane — it isn't another reimplemented agent. Around it
 sits a lightweight editor with syntax highlighting, a file explorer, multiple terminals, git, and
 **live accept/reject diffs** for the edits Claude proposes. The point: stop juggling separate
 windows for `claude`, `nvim`, `npm run dev`, and `git` — keep them all in one terminal.
@@ -54,12 +54,12 @@ warren /path/dir  # open a specific folder
 ```
 
 Open a terminal (`ctrl+t`), run `claude`, and ask it to edit a file. warren intercepts the edit and
-shows it as a full-file inline diff with real line numbers — press `enter` to accept or `esc` to
+shows it as a full-file inline diff with line numbers — press `enter` to accept or `esc` to
 reject, without leaving the editor.
 
 ## Features
 
-- **Wraps the real `claude`** in a PTY pane — full color, mouse, scrollback, and input fidelity.
+- **Wraps `claude`** in a PTY pane — full color, mouse, scrollback, and input fidelity.
 - **Live accept/reject diffs** — Claude's edits open as a VS Code-style whole-file diff with dual
   `old │ new` line numbers, syntax highlighting, and a jump to the first change; accept or reject
   in place.
