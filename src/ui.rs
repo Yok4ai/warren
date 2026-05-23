@@ -22,14 +22,6 @@ fn dark() -> &'static theme::Theme {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = frame.area().width;
     app.editor_hbar = None;
-    // Solid background: paint the whole area first so it shows through any pane that doesn't set
-    // its own background (overrides terminal transparency). Off by default.
-    if app.solid_bg {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(dark().bg)),
-            frame.area(),
-        );
-    }
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
@@ -96,6 +88,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.dragging {
         draw_drag_label(frame, app, frame.area());
+    }
+
+    // Solid background: as the last step, fill every still-transparent cell with the theme bg.
+    // This catches the terminal pane (tui-term writes Reset backgrounds) and the overlays
+    // (Clear resets to default), while leaving cells with real colors untouched.
+    if app.solid_bg {
+        let area = frame.area();
+        let bg = dark().bg;
+        let buf = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    if cell.bg == Color::Reset {
+                        cell.set_bg(bg);
+                    }
+                }
+            }
+        }
     }
 }
 
