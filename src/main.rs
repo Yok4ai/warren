@@ -5,6 +5,7 @@ mod config;
 mod editor;
 mod event;
 mod explorer;
+mod git;
 mod highlight;
 mod palette;
 mod prompt;

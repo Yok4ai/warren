@@ -41,6 +41,9 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - `highlight.rs` — syntect (fancy-regex, no C deps); `highlight_rope` highlights per rope line
   so line counts stay aligned with cursor coordinates.
 - `watcher.rs` — `notify` fs watcher → `AppEvent::FsChanged`; ignores `target/.git/node_modules`.
+- `terminal.rs` — `TerminalPane` (PTY via portable-pty/vt100/tui-term) + `Panel` (multi-terminal).
+- `palette.rs` — fuzzy file finder + command mode (nucleo-matcher).
+- `git.rs` — `git2` (no-TLS): status, log, diffs, commit-files, stage/unstage, commit.
 - `prompt.rs` — reusable modal single-line input (currently new-file).
 - `theme.rs` — the single built-in dark theme.
 - `ui.rs` — all rendering: sidebar + editor (tabs/content/selection/scrollbar) + statusline
@@ -49,7 +52,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 ## Conventions / gotchas
 
 - **Pinned `ratatui 0.29`** (0.30 needs Rust ≥1.86; project MSRV is 1.85). Same for `notify`,
-  `ropey 1.x` — verify MSRV at `cargo add` time.
+  `ropey 1.x`, and **`git2 0.19` with `--no-default-features`** (0.21 needs Rust ≥1.87; default
+  features pull `openssl-sys`, absent here — so push/pull/TLS is disabled). Verify MSRV at `cargo add`.
 - `syntect` uses `default-fancy` (pure-Rust regex) to avoid the oniguruma C build.
 - Clipboard = **OSC 52** escape (no clipboard daemon, works over SSH); see `copy_to_clipboard`.
 - Don't paint a full-screen background — the user runs a transparent kitty; let it show through.
@@ -59,8 +63,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 
 ## Default keybindings
 
-`ctrl+q` quit · `ctrl+p` palette (todo) · `ctrl+b` toggle sidebar · `alt+e` toggle editor
-· `ctrl+w` cycle focus
+`ctrl+q` quit · `ctrl+p` palette · `ctrl+b` toggle sidebar · `ctrl+g` source control
+· `alt+e` toggle editor · `ctrl+w` cycle focus
 · `ctrl+n` new file · `ctrl+s` save · `ctrl+x` close tab · `ctrl+pageup/pagedown` prev/next tab
 · `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `f1` keybindings overlay.
 Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run

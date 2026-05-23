@@ -1,9 +1,11 @@
 //! Application state and the central run loop.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use git2::Oid;
 use crossterm::event::{
     Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -16,6 +18,7 @@ use crate::config::Config;
 use crate::editor::Editor;
 use crate::event::{self, AppEvent};
 use crate::explorer::FileTree;
+use crate::git::{Change, Commit, Git};
 use crate::palette::{self, Choice, Command, Palette};
 use crate::prompt::{Prompt, PromptKind};
 use crate::terminal::{Panel, TerminalPane};
@@ -30,6 +33,28 @@ pub enum Focus {
     Terminal,
 }
 
+/// What the sidebar shows (the VS Code "activity bar" views we support).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarMode {
+    Explorer,
+    SourceControl,
+}
+
+/// A selectable row in the source-control view (flattened from changes + the expandable graph).
+#[derive(Clone)]
+pub enum ScmItem {
+    /// A working-tree change (index into `git_changes`).
+    Change(usize),
+    /// A commit row (index into `git_commits`).
+    Commit(usize),
+    /// A file inside an expanded commit.
+    CommitFile {
+        commit: usize,
+        path: String,
+        code: char,
+    },
+}
+
 /// Global application state. The run loop owns this and is the only writer.
 pub struct App {
     pub config: Config,
@@ -38,7 +63,20 @@ pub struct App {
     pub editor: Editor,
     pub focus: Focus,
     pub sidebar_visible: bool,
+    pub sidebar_mode: SidebarMode,
     pub editor_visible: bool,
+    /// Git repository for the workspace, if any, and its cached state.
+    git: Option<Git>,
+    pub git_branch: String,
+    pub git_changes: Vec<Change>,
+    pub git_commits: Vec<Commit>,
+    /// Commits whose file list is expanded in the graph.
+    pub git_expanded: HashSet<Oid>,
+    /// Flattened, currently-visible SCM rows (changes + commits + expanded files).
+    pub scm_items: Vec<ScmItem>,
+    pub scm_selected: usize,
+    /// Screen-row → SCM item index, set by the renderer for click mapping.
+    pub scm_rows: Vec<(u16, usize)>,
     /// Sidebar width in columns (draggable).
     pub sidebar_width: u16,
     /// True while dragging the sidebar/editor divider.
@@ -109,6 +147,7 @@ impl App {
             .and_then(|p| p.canonicalize().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let tree = FileTree::new(workspace.clone());
+        let git = Git::open(&workspace);
         Self {
             config,
             workspace,
@@ -116,7 +155,16 @@ impl App {
             editor: Editor::default(),
             focus: Focus::Sidebar,
             sidebar_visible: true,
+            sidebar_mode: SidebarMode::Explorer,
             editor_visible: true,
+            git,
+            git_branch: String::new(),
+            git_changes: Vec::new(),
+            git_commits: Vec::new(),
+            git_expanded: HashSet::new(),
+            scm_items: Vec::new(),
+            scm_selected: 0,
+            scm_rows: Vec::new(),
             sidebar_width: 32,
             resizing: false,
             dragging_scrollbar: false,
@@ -193,6 +241,9 @@ impl App {
             for path in std::mem::take(&mut self.changed_paths) {
                 self.editor.reload(&path);
             }
+            if self.sidebar_mode == SidebarMode::SourceControl {
+                self.refresh_git();
+            }
             self.needs_redraw = true;
         }
         self.editor.refresh_highlight();
@@ -254,6 +305,9 @@ impl App {
             return;
         }
         if self.focus == Focus::Editor {
+            if self.editor.active_buffer().map(|b| b.is_readonly()).unwrap_or(false) {
+                return;
+            }
             self.editor.delete_selection();
             let vp = self.editor.viewport.max(1);
             if let Some(b) = self.editor.active_buffer_mut() {
@@ -311,7 +365,9 @@ impl App {
                     self.resizing = true;
                 } else if in_sidebar {
                     self.focus = Focus::Sidebar;
-                    if m.row >= 1 {
+                    if self.sidebar_mode == SidebarMode::SourceControl {
+                        self.scm_click(m.row);
+                    } else if m.row >= 1 {
                         let idx = self.tree.scroll + (m.row as usize - 1);
                         if idx < self.tree.rows.len() {
                             self.tree.selected = idx;
@@ -644,6 +700,17 @@ impl App {
             if !self.editor_visible && self.focus == Focus::Editor {
                 self.cycle_focus();
             }
+        } else if km.toggle_scm.matches(c, m) {
+            self.sidebar_mode = if self.sidebar_mode == SidebarMode::SourceControl {
+                SidebarMode::Explorer
+            } else {
+                SidebarMode::SourceControl
+            };
+            self.sidebar_visible = true;
+            self.focus = Focus::Sidebar;
+            if self.sidebar_mode == SidebarMode::SourceControl {
+                self.refresh_git();
+            }
         } else if km.focus_next.matches(c, m) {
             self.cycle_focus();
         } else if km.new_file.matches(c, m) {
@@ -894,6 +961,20 @@ impl App {
                     Err(e) => self.status = format!("error: {e}"),
                 }
             }
+            PromptKind::Commit => {
+                let msg = prompt.input.trim().to_string();
+                if msg.is_empty() {
+                    return;
+                }
+                match self.git.as_ref().map(|g| g.commit(&msg)) {
+                    Some(Ok(())) => {
+                        self.status = "committed".into();
+                        self.refresh_git();
+                    }
+                    Some(Err(e)) => self.status = format!("commit failed: {e}"),
+                    None => self.status = "no git repo".into(),
+                }
+            }
         }
     }
 
@@ -1028,13 +1109,142 @@ impl App {
     }
 
     fn handle_sidebar(&mut self, key: KeyEvent) {
+        match self.sidebar_mode {
+            SidebarMode::Explorer => match key.code {
+                KeyCode::Up => self.tree.move_up(),
+                KeyCode::Down => self.tree.move_down(),
+                KeyCode::Right => self.tree.expand(),
+                KeyCode::Left => self.tree.collapse(),
+                KeyCode::Enter => self.activate_selected(),
+                _ => {}
+            },
+            SidebarMode::SourceControl => self.handle_scm_keys(key),
+        }
+    }
+
+    fn handle_scm_keys(&mut self, key: KeyEvent) {
+        let total = self.scm_items.len();
         match key.code {
-            KeyCode::Up => self.tree.move_up(),
-            KeyCode::Down => self.tree.move_down(),
-            KeyCode::Right => self.tree.expand(),
-            KeyCode::Left => self.tree.collapse(),
-            KeyCode::Enter => self.activate_selected(),
+            KeyCode::Up => self.scm_selected = self.scm_selected.saturating_sub(1),
+            KeyCode::Down => {
+                if self.scm_selected + 1 < total {
+                    self.scm_selected += 1;
+                }
+            }
+            KeyCode::Enter => self.scm_activate(),
+            KeyCode::Char('s') => self.scm_stage_toggle(),
+            KeyCode::Char('c') => self.prompt = Some(Prompt::commit()),
             _ => {}
+        }
+    }
+
+    pub fn has_git(&self) -> bool {
+        self.git.is_some()
+    }
+
+    /// Recompute git state from the repository, then rebuild the flattened item list.
+    fn refresh_git(&mut self) {
+        if let Some(g) = &self.git {
+            self.git_branch = g.branch();
+            self.git_changes = g.changes();
+            self.git_commits = g.log(100);
+        }
+        self.rebuild_scm_items();
+    }
+
+    /// Flatten changes + the (expandable) commit graph into the selectable item list.
+    fn rebuild_scm_items(&mut self) {
+        let mut items = Vec::new();
+        for i in 0..self.git_changes.len() {
+            items.push(ScmItem::Change(i));
+        }
+        for (j, c) in self.git_commits.iter().enumerate() {
+            items.push(ScmItem::Commit(j));
+            if self.git_expanded.contains(&c.id) {
+                if let Some(g) = &self.git {
+                    for (path, code) in g.commit_files(c.id) {
+                        items.push(ScmItem::CommitFile { commit: j, path, code });
+                    }
+                }
+            }
+        }
+        self.scm_items = items;
+        if self.scm_selected >= self.scm_items.len() {
+            self.scm_selected = self.scm_items.len().saturating_sub(1);
+        }
+    }
+
+    /// Enter on an SCM row: change → its diff; commit → expand/collapse; commit-file → its diff.
+    fn scm_activate(&mut self) {
+        let Some(item) = self.scm_items.get(self.scm_selected).cloned() else {
+            return;
+        };
+        match item {
+            ScmItem::Change(i) => {
+                let path = self.git_changes[i].path.clone();
+                if let Some(diff) = self.git.as_ref().map(|g| g.file_diff(&path)) {
+                    self.editor.open_virtual(format!("◆ {path}"), "diff", &diff);
+                    self.editor_visible = true;
+                    self.focus = Focus::Editor;
+                }
+            }
+            ScmItem::Commit(j) => {
+                if let Some((oid, short)) =
+                    self.git_commits.get(j).map(|c| (c.id, c.short.clone()))
+                {
+                    // Toggle the file list...
+                    if !self.git_expanded.insert(oid) {
+                        self.git_expanded.remove(&oid);
+                    }
+                    self.rebuild_scm_items();
+                    // ...and show the commit's message + info in the editor (keep sidebar focus
+                    // so you can keep browsing commits).
+                    if let Some(details) = self.git.as_ref().map(|g| g.commit_details(oid)) {
+                        self.editor
+                            .open_virtual(format!("● {short}"), "diff", &details);
+                        self.editor_visible = true;
+                    }
+                }
+            }
+            ScmItem::CommitFile { commit, path, .. } => {
+                if let Some((oid, short)) =
+                    self.git_commits.get(commit).map(|c| (c.id, c.short.clone()))
+                {
+                    if let Some(diff) = self.git.as_ref().map(|g| g.commit_file_diff(oid, &path)) {
+                        self.editor
+                            .open_virtual(format!("● {short} ◆ {path}"), "diff", &diff);
+                        self.editor_visible = true;
+                        self.focus = Focus::Editor;
+                    }
+                }
+            }
+        }
+    }
+
+    fn scm_stage_toggle(&mut self) {
+        let Some(ScmItem::Change(i)) = self.scm_items.get(self.scm_selected).cloned() else {
+            return;
+        };
+        let change = &self.git_changes[i];
+        let (path, staged) = (change.path.clone(), change.staged);
+        let res = self.git.as_ref().map(|g| {
+            if staged {
+                g.unstage(&path)
+            } else {
+                g.stage(&path)
+            }
+        });
+        if let Some(Err(e)) = res {
+            self.status = format!("git: {e}");
+        }
+        self.refresh_git();
+    }
+
+    /// Map a click row in the SCM sidebar to its item and activate it.
+    fn scm_click(&mut self, row: u16) {
+        if let Some(&(_, idx)) = self.scm_rows.iter().find(|(y, _)| *y == row) {
+            self.scm_selected = idx;
+            self.scm_activate();
         }
     }
 
@@ -1078,6 +1288,30 @@ impl App {
         }
 
         let vp = self.editor.viewport.max(1);
+
+        // Read-only buffers (diffs, commit details): movement/scroll only.
+        if self.editor.active_buffer().map(|b| b.is_readonly()).unwrap_or(false) {
+            if let Some(b) = self.editor.active_buffer_mut() {
+                match c {
+                    KeyCode::Up => b.move_up(1),
+                    KeyCode::Down => b.move_down(1),
+                    KeyCode::PageUp => b.move_up(vp),
+                    KeyCode::PageDown => b.move_down(vp),
+                    KeyCode::Left if ctrl => b.move_word_left(),
+                    KeyCode::Right if ctrl => b.move_word_right(),
+                    KeyCode::Left => b.move_left(),
+                    KeyCode::Right => b.move_right(),
+                    KeyCode::Home => b.set_cursor(0, 0),
+                    KeyCode::End => {
+                        let last = b.line_count().saturating_sub(1);
+                        b.set_cursor(last, usize::MAX);
+                    }
+                    _ => {}
+                }
+                b.ensure_cursor_visible(vp);
+            }
+            return;
+        }
 
         // With a non-empty selection, an edit replaces the whole selection.
         let has_sel = self.editor.selection.map(|s| !s.is_empty()).unwrap_or(false);

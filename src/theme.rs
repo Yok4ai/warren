@@ -11,6 +11,10 @@ pub struct Theme {
     pub status_bg: Color,
     pub status_fg: Color,
     pub sel_bg: Color,
+    pub diff_add_bg: Color,
+    pub diff_del_bg: Color,
+    pub diff_add_fg: Color,
+    pub diff_del_fg: Color,
 }
 
 pub const DARK: Theme = Theme {
@@ -21,4 +25,8 @@ pub const DARK: Theme = Theme {
     status_bg: Color::Rgb(0x1f, 0x23, 0x35),
     status_fg: Color::Rgb(0xa9, 0xb1, 0xd6),
     sel_bg: Color::Rgb(0x33, 0x46, 0x7c),
+    diff_add_bg: Color::Rgb(0x1d, 0x35, 0x28),
+    diff_del_bg: Color::Rgb(0x3a, 0x22, 0x28),
+    diff_add_fg: Color::Rgb(0x9e, 0xd7, 0xa6),
+    diff_del_fg: Color::Rgb(0xe6, 0xa0, 0xa6),
 };

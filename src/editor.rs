@@ -50,6 +50,10 @@ pub struct Buffer {
     pub modified: bool,
     /// When the buffer was last edited, used to debounce auto-save.
     last_edit: Instant,
+    /// Read-only buffers (diffs, commit details) ignore edits and saves.
+    readonly: bool,
+    /// A diff/patch buffer: rendered with green/red line backgrounds.
+    pub is_diff: bool,
 }
 
 impl Buffer {
@@ -71,7 +75,49 @@ impl Buffer {
             scroll: 0,
             modified: false,
             last_edit: Instant::now(),
+            readonly: false,
+            is_diff: false,
         })
+    }
+
+    /// A read-only buffer backed by in-memory text (e.g. a diff or commit details). `ext` drives
+    /// syntax highlighting; `name` is the tab label. `ext == "diff"` enables green/red line
+    /// backgrounds (and skips syntect, since the row backgrounds carry the meaning).
+    fn from_virtual(name: String, ext: &str, text: &str) -> Self {
+        let rope = Rope::from_str(text);
+        let path = PathBuf::from(format!("\u{0}{name}.{ext}"));
+        let is_diff = ext == "diff";
+        let lines = if is_diff {
+            let mut v: Vec<Line<'static>> = rope
+                .lines()
+                .map(|l| {
+                    let mut s = l.to_string();
+                    while s.ends_with('\n') || s.ends_with('\r') {
+                        s.pop();
+                    }
+                    Line::raw(s)
+                })
+                .collect();
+            if v.is_empty() {
+                v.push(Line::raw(""));
+            }
+            v
+        } else {
+            highlight::highlight_rope(&path, &rope)
+        };
+        Self {
+            lines,
+            path,
+            name,
+            rope,
+            highlight_dirty: false,
+            cursor: (0, 0),
+            scroll: 0,
+            modified: false,
+            last_edit: Instant::now(),
+            readonly: true,
+            is_diff,
+        }
     }
 
     pub fn line_count(&self) -> usize {
@@ -110,6 +156,10 @@ impl Buffer {
         self.rope.line_to_char(self.cursor.0) + self.cursor.1
     }
 
+    pub fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
     fn touch(&mut self) {
         self.modified = true;
         self.highlight_dirty = true;
@@ -117,6 +167,9 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        if self.readonly {
+            return;
+        }
         let idx = self.cursor_char();
         self.rope.insert_char(idx, ch);
         if ch == '\n' {
@@ -300,6 +353,9 @@ impl Buffer {
     }
 
     fn save(&mut self) -> Result<()> {
+        if self.readonly {
+            return Ok(());
+        }
         std::fs::write(&self.path, self.rope.to_string())
             .with_context(|| format!("writing {}", self.path.display()))?;
         self.modified = false;
@@ -351,6 +407,19 @@ impl Editor {
         self.tabs.push(buf);
         self.active = self.tabs.len() - 1;
         Ok(())
+    }
+
+    /// Open (or replace) a read-only tab showing in-memory text such as a diff.
+    pub fn open_virtual(&mut self, name: String, ext: &str, text: &str) {
+        self.selection = None;
+        let buf = Buffer::from_virtual(name.clone(), ext, text);
+        if let Some(i) = self.tabs.iter().position(|b| b.name == name) {
+            self.tabs[i] = buf;
+            self.active = i;
+        } else {
+            self.tabs.push(buf);
+            self.active = self.tabs.len() - 1;
+        }
     }
 
     pub fn active_buffer(&self) -> Option<&Buffer> {

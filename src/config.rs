@@ -102,6 +102,7 @@ pub struct Keymap {
     pub command_palette: KeyChord,
     pub toggle_sidebar: KeyChord,
     pub toggle_editor: KeyChord,
+    pub toggle_scm: KeyChord,
     pub new_terminal: KeyChord,
     pub focus_next: KeyChord,
     pub next_tab: KeyChord,
@@ -125,6 +126,7 @@ impl Default for Keymap {
             command_palette: KeyChord::new(Char('p'), ctrl),
             toggle_sidebar: KeyChord::new(Char('b'), ctrl),
             toggle_editor: KeyChord::new(Char('e'), KeyModifiers::ALT),
+            toggle_scm: KeyChord::new(Char('g'), ctrl),
             new_terminal: KeyChord::new(Char('t'), ctrl),
             focus_next: KeyChord::new(Char('w'), ctrl),
             next_tab: KeyChord::new(PageDown, ctrl),
@@ -153,6 +155,7 @@ impl Keymap {
             ("Cycle focus", self.focus_next),
             ("Toggle sidebar", self.toggle_sidebar),
             ("Toggle editor", self.toggle_editor),
+            ("Source control", self.toggle_scm),
             ("Toggle scrollbar", self.toggle_scrollbar),
             ("Toggle auto-save", self.toggle_autosave),
             ("Command palette", self.command_palette),
@@ -174,6 +177,7 @@ impl Keymap {
                 "command_palette" => self.command_palette = chord,
                 "toggle_sidebar" => self.toggle_sidebar = chord,
                 "toggle_editor" => self.toggle_editor = chord,
+                "toggle_scm" => self.toggle_scm = chord,
                 "new_terminal" => self.new_terminal = chord,
                 "focus_next" => self.focus_next = chord,
                 "next_tab" => self.next_tab = chord,
@@ -212,6 +216,7 @@ quit = \"ctrl+q\"
 command_palette = \"ctrl+p\"
 toggle_sidebar = \"ctrl+b\"
 toggle_editor = \"alt+e\"
+toggle_scm = \"ctrl+g\"
 new_terminal = \"ctrl+t\"
 focus_next = \"ctrl+w\"
 next_tab = \"ctrl+pagedown\"

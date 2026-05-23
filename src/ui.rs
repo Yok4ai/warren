@@ -10,7 +10,7 @@ use crate::palette::Palette;
 use crate::prompt::Prompt;
 use ratatui::Frame;
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, ScmItem, SidebarMode};
 use crate::theme::DARK;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -274,6 +274,159 @@ fn border_color(focused: bool) -> Color {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.sidebar_mode {
+        SidebarMode::Explorer => draw_explorer(frame, app, area),
+        SidebarMode::SourceControl => draw_scm(frame, app, area),
+    }
+}
+
+/// Source-control view: a CHANGES list and a GRAPH (commit) list, with one selection across both.
+fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::Sidebar;
+    let title = if app.git_branch.is_empty() {
+        " Source Control ".to_string()
+    } else {
+        format!(" Source Control — {} ", app.git_branch)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color(focused)))
+        .title(Span::styled(title, Style::default().fg(DARK.accent).bold()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if !app.has_git() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "not a git repository",
+                Style::default().fg(DARK.dim),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    let width = inner.width as usize;
+    let n_changes = app.git_changes.len();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut item_line: Vec<(usize, usize)> = Vec::new();
+    let mut graph_emitted = false;
+
+    lines.push(Line::from(Span::styled(
+        format!("CHANGES ({n_changes})"),
+        Style::default().fg(DARK.dim).bold(),
+    )));
+    for (idx, item) in app.scm_items.iter().enumerate() {
+        let sel = idx == app.scm_selected;
+        match item {
+            ScmItem::Change(i) => {
+                item_line.push((lines.len(), idx));
+                lines.push(scm_change_line(&app.git_changes[*i], sel, width));
+            }
+            ScmItem::Commit(j) => {
+                if !graph_emitted {
+                    lines.push(Line::raw(""));
+                    lines.push(Line::from(Span::styled(
+                        "GRAPH",
+                        Style::default().fg(DARK.dim).bold(),
+                    )));
+                    graph_emitted = true;
+                }
+                let c = &app.git_commits[*j];
+                let twisty = if app.git_expanded.contains(&c.id) {
+                    "▾"
+                } else {
+                    "▸"
+                };
+                let text = format!("{twisty} {} · {} · {}  {}", c.short, c.author, c.when, c.summary);
+                let text: String = text.chars().take(width).collect();
+                let style = if sel {
+                    Style::default().bg(DARK.accent).fg(Color::Black)
+                } else {
+                    Style::default().fg(DARK.fg)
+                };
+                item_line.push((lines.len(), idx));
+                lines.push(Line::from(Span::styled(
+                    if sel { format!("{text:<width$}") } else { text },
+                    style,
+                )));
+            }
+            ScmItem::CommitFile { code, path, .. } => {
+                let text = format!("      {code} {path}");
+                let text: String = text.chars().take(width).collect();
+                let style = if sel {
+                    Style::default().bg(DARK.accent).fg(Color::Black)
+                } else {
+                    Style::default().fg(DARK.dim)
+                };
+                item_line.push((lines.len(), idx));
+                lines.push(Line::from(Span::styled(
+                    if sel { format!("{text:<width$}") } else { text },
+                    style,
+                )));
+            }
+        }
+    }
+
+    // Reserve a column for a scrollbar when the content overflows.
+    let total = lines.len();
+    let show_sb = total > inner.height as usize && inner.width > 1;
+    let content = if show_sb {
+        Rect::new(inner.x, inner.y, inner.width - 1, inner.height)
+    } else {
+        inner
+    };
+
+    // Scroll so the selected item stays visible.
+    let h = content.height as usize;
+    let sel_line = item_line
+        .iter()
+        .find(|(_, item)| *item == app.scm_selected)
+        .map(|(li, _)| *li)
+        .unwrap_or(0);
+    let off = if sel_line >= h { sel_line + 1 - h } else { 0 };
+
+    app.scm_rows = item_line
+        .iter()
+        .filter(|(li, _)| *li >= off && *li < off + h)
+        .map(|(li, item)| (content.y + (li - off) as u16, *item))
+        .collect();
+
+    let visible: Vec<Line> = lines.into_iter().skip(off).take(h).collect();
+    frame.render_widget(Paragraph::new(visible), content);
+    if show_sb {
+        draw_scrollbar(frame, inner, total, off);
+    }
+}
+
+fn scm_change_line(ch: &crate::git::Change, selected: bool, width: usize) -> Line<'static> {
+    let code_color = match ch.code {
+        'A' | 'U' => Color::Green,
+        'D' | 'C' => Color::Red,
+        'R' => Color::Cyan,
+        _ => Color::Yellow,
+    };
+    let dot = if ch.staged { "●" } else { " " };
+    if selected {
+        let text = format!("{dot}{} {}", ch.code, ch.path);
+        let text: String = text.chars().take(width).collect();
+        Line::from(Span::styled(
+            format!("{text:<width$}"),
+            Style::default().bg(DARK.accent).fg(Color::Black),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(
+                dot.to_string(),
+                Style::default().fg(if ch.staged { Color::Green } else { DARK.dim }),
+            ),
+            Span::styled(format!("{} ", ch.code), Style::default().fg(code_color)),
+            Span::styled(ch.path.clone(), Style::default().fg(DARK.fg)),
+        ])
+    }
+}
+
+fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -285,8 +438,17 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let height = inner.height as usize;
-    let width = inner.width as usize;
+    // Reserve a column for a scrollbar when the tree overflows.
+    let total = app.tree.rows.len();
+    let show_sb = total > inner.height as usize && inner.width > 1;
+    let content = if show_sb {
+        Rect::new(inner.x, inner.y, inner.width - 1, inner.height)
+    } else {
+        inner
+    };
+
+    let height = content.height as usize;
+    let width = content.width as usize;
     app.tree.ensure_visible(height);
     let scroll = app.tree.scroll;
 
@@ -328,7 +490,10 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), content);
+    if show_sb {
+        draw_scrollbar(frame, inner, total, scroll);
+    }
 }
 
 fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -465,6 +630,26 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         let end = (start + text_area.height as usize).min(total);
         let visible: Vec<Line> = buf.lines[start..end].to_vec();
         frame.render_widget(Paragraph::new(visible), text_area);
+    }
+
+    // Diff buffers: paint full-width green/red line backgrounds (added/removed).
+    if let Some(buf) = app.editor.active_buffer() {
+        if buf.is_diff {
+            let start = buf.scroll.min(total.saturating_sub(1));
+            let end = (start + text_area.height as usize).min(total);
+            for li in start..end {
+                let style = match buf.line_text(li).chars().next() {
+                    Some('+') => Style::default().bg(DARK.diff_add_bg).fg(DARK.diff_add_fg),
+                    Some('-') => Style::default().bg(DARK.diff_del_bg).fg(DARK.diff_del_fg),
+                    Some('@') => Style::default().fg(DARK.accent),
+                    _ => continue,
+                };
+                let y = text_area.y + (li - buf.scroll) as u16;
+                frame
+                    .buffer_mut()
+                    .set_style(Rect::new(text_area.x, y, text_area.width, 1), style);
+            }
+        }
     }
     draw_selection(frame, app, text_area);
 

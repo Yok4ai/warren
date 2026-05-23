@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub enum PromptKind {
     /// Create a new file relative to `base`.
     NewFile { base: PathBuf },
+    /// Commit the staged changes with the entered message.
+    Commit,
 }
 
 pub struct Prompt {
@@ -25,6 +27,15 @@ impl Prompt {
             input: String::new(),
             cursor: 0,
             kind: PromptKind::NewFile { base },
+        }
+    }
+
+    pub fn commit() -> Self {
+        Self {
+            title: "Commit message".into(),
+            input: String::new(),
+            cursor: 0,
+            kind: PromptKind::Commit,
         }
     }
 

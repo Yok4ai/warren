@@ -27,10 +27,11 @@ Phased build of the TUI IDE. Design doc: `~/.claude/plans/i-want-you-to-ancient-
 - [x] **Phase 4 — Command palette.** `ctrl+p` fuzzy file finder (nucleo-matcher) + command mode
       (`>`). Works from any focus (incl. terminals). Terminal newline: alt/ctrl+Enter → ESC CR.
 
-## Next
-
-- [ ] **Phase 6 — Git.** `git2` status/stage/commit/push/pull/diff + SCM sidebar view (changes
-      list + commit graph; click a commit for author/time/message + diff). VS Code-style.
+- [x] **Phase 6 — Git source control.** `ctrl+g` toggles the sidebar to a VS Code-style SCM view:
+      CHANGES list (status letters, stage/unstage `s`, commit `c`) + an expandable commit GRAPH.
+      Click a change → its diff; click a commit → message/info + expand its files; click a file →
+      that file's diff. Diffs render with green/red line backgrounds. Sidebar scrollbars.
+      (`git2 0.19`, no TLS — push/pull deferred.)
 
 ## Later / deferred
 
