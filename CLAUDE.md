@@ -60,6 +60,16 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - Comments explain *why*, match surrounding density. Keep `cargo clippy` warning-free.
 - Mouse capture is on, so native terminal selection needs Shift+drag; warren does its own
   pane-scoped selection instead.
+- **Scrollbar house style** (editor vertical/horizontal, sidebar — keep all consistent):
+  1. Custom-drawn via `draw_scrollbar` / `buf.cell_mut` — NOT ratatui's `Scrollbar` (it maps the
+     thumb against total length and stops short of the end).
+  2. Thumb sized to the visible fraction and positioned over the draggable range `track - thumb`,
+     so it sits **flush at the end** at max scroll.
+  3. **Click never jumps — only dragging scrolls**, with a grab offset so the thumb tracks the
+     cursor (`*_grab_offset` + `*_to` helpers in `app.rs`; e.g. `scroll_bar_to`, `hbar_to`,
+     `sidebar_sb_to`). Reserve a track row/column in the layout so it doesn't overlap content.
+  4. The scroll offset is **independent of selection**: wheel/drag move the view only; keyboard
+     nav moves the selection and nudges the offset to keep it visible (`ensure_visible`-style).
 
 ## Default keybindings
 
