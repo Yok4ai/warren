@@ -1,6 +1,6 @@
 # warren
 
-A terminal TUI "IDE" that **wraps the real Claude Code CLI** (not a reimplemented agent).
+A terminal TUI "IDE" that **wraps the Claude Code CLI** (not a reimplemented agent).
 Goal: file explorer + lightweight editor + an embedded `claude` pane + git, all in one terminal,
 so you never leave it to juggle separate windows for `claude`, `npm run dev`, `btop`, etc.
 

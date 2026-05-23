@@ -1,6 +1,6 @@
 # warren
 
-A terminal IDE that **wraps the real [Claude Code](https://claude.com/claude-code) CLI** — not a
+A terminal IDE that **wraps the [Claude Code](https://claude.com/claude-code) CLI** — not a
 reimplemented agent. File explorer, a lightweight editor with tabs and syntax highlighting, an
 embedded `claude` pane, multiple terminals, git, and **live accept/reject diffs** for the edits
 Claude proposes — all in one terminal, so you never leave it to juggle separate windows.
@@ -31,7 +31,7 @@ cargo install --path .
 ```
 </details>
 
-> The embedded Claude pane and the diff integration need the real `claude` CLI on your `PATH`.
+> The embedded Claude pane and the diff integration need the `claude` CLI on your `PATH`.
 > Everything else (editor, explorer, terminals, git) works without it.
 
 ## Usage
@@ -46,7 +46,7 @@ a full-file inline diff with real line numbers — press `enter` to accept or `e
 
 ## Features
 
-- **Wraps the real `claude`** in a PTY pane — full color, mouse, and input fidelity.
+- **Wraps `claude`** in a PTY pane — full color, mouse, and input fidelity.
 - **Live diffs** — Claude's edits open as a VS Code-style whole-file diff (dual old│new line
   numbers, green/red, jumps to the first change); accept/reject without leaving warren.
 - **Editor** — tabs, syntax highlighting, rope buffers, undo/redo, find, text selection, save,
