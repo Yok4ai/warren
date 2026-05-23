@@ -84,10 +84,11 @@ pub struct App {
     pub scm_total_lines: usize,
     /// Screen-row → SCM item index, set by the renderer for click mapping.
     pub scm_rows: Vec<(u16, usize)>,
-    /// Sidebar scrollbar geometry (column, top-row, height) when shown; for drag-to-scroll.
-    pub sidebar_sb: Option<(u16, u16, u16)>,
-    /// True while dragging the sidebar scrollbar.
+    /// Sidebar scrollbar geometry (column, top-row, height, total-rows) when shown.
+    pub sidebar_sb: Option<(u16, u16, u16, usize)>,
+    /// True while dragging the sidebar scrollbar, and the grab offset within the thumb.
     dragging_sidebar_sb: bool,
+    sidebar_sb_grab: i32,
     /// Sidebar width in columns (draggable).
     pub sidebar_width: u16,
     /// True while dragging the sidebar/editor divider.
@@ -186,6 +187,7 @@ impl App {
             scm_rows: Vec::new(),
             sidebar_sb: None,
             dragging_sidebar_sb: false,
+            sidebar_sb_grab: 0,
             sidebar_width: 32,
             resizing: false,
             dragging_scrollbar: false,
@@ -388,8 +390,9 @@ impl App {
                 } else if in_sidebar {
                     self.focus = Focus::Sidebar;
                     if self.on_sidebar_scrollbar(&m) {
+                        // Grab the thumb without jumping; only dragging scrolls.
                         self.dragging_sidebar_sb = true;
-                        self.sidebar_sb_to(m.row);
+                        self.sidebar_sb_grab = self.sidebar_sb_grab_offset(m.row);
                     } else if self.sidebar_mode == SidebarMode::SourceControl {
                         self.scm_click(m.row);
                     } else if m.row >= 1 {
@@ -1338,30 +1341,49 @@ impl App {
 
     fn on_sidebar_scrollbar(&self, m: &MouseEvent) -> bool {
         match self.sidebar_sb {
-            Some((col, y, h)) => m.column == col && m.row >= y && m.row < y + h,
+            Some((col, y, h, _)) => m.column == col && m.row >= y && m.row < y + h,
             None => false,
         }
     }
 
-    /// Drag the sidebar scrollbar: set the scroll offset proportionally (selection untouched).
+    fn sidebar_scroll(&self) -> usize {
+        match self.sidebar_mode {
+            SidebarMode::Explorer => self.tree.scroll,
+            SidebarMode::SourceControl => self.scm_scroll,
+        }
+    }
+
+    /// Offset between a grab row and the sidebar thumb's top, so dragging holds the thumb.
+    fn sidebar_sb_grab_offset(&self, row: u16) -> i32 {
+        let Some((_, y, h, total)) = self.sidebar_sb else {
+            return 0;
+        };
+        let track = h as usize;
+        let thumb = (track * track / total.max(1)).clamp(1, track);
+        let max_scroll = total.saturating_sub(track);
+        let denom = track.saturating_sub(thumb).max(1);
+        let thumb_top = if max_scroll > 0 {
+            self.sidebar_scroll() * denom / max_scroll
+        } else {
+            0
+        };
+        row.saturating_sub(y) as i32 - thumb_top as i32
+    }
+
+    /// Drag the sidebar scrollbar: set the scroll offset so the thumb tracks the cursor.
     fn sidebar_sb_to(&mut self, row: u16) {
-        let Some((_, y, h)) = self.sidebar_sb else {
+        let Some((_, y, h, total)) = self.sidebar_sb else {
             return;
         };
-        let height = h as usize;
-        if height <= 1 {
-            return;
-        }
-        let frac = (row.saturating_sub(y)) as f32 / (h - 1) as f32;
+        let track = h as usize;
+        let thumb = (track * track / total.max(1)).clamp(1, track);
+        let max_scroll = total.saturating_sub(track);
+        let denom = track.saturating_sub(thumb).max(1);
+        let target = (row as i32 - y as i32 - self.sidebar_sb_grab).clamp(0, denom as i32) as usize;
+        let scroll = target * max_scroll / denom;
         match self.sidebar_mode {
-            SidebarMode::Explorer => {
-                let max = self.tree.rows.len().saturating_sub(height);
-                self.tree.scroll = ((frac * max as f32).round() as usize).min(max);
-            }
-            SidebarMode::SourceControl => {
-                let max = self.scm_total_lines.saturating_sub(height);
-                self.scm_scroll = ((frac * max as f32).round() as usize).min(max);
-            }
+            SidebarMode::Explorer => self.tree.scroll = scroll,
+            SidebarMode::SourceControl => self.scm_scroll = scroll,
         }
     }
 

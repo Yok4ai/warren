@@ -403,7 +403,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(visible), content);
     if show_sb {
         draw_scrollbar(frame, inner, total, off);
-        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height));
+        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height, total));
     }
 }
 
@@ -504,7 +504,7 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), content);
     if show_sb {
         draw_scrollbar(frame, inner, total, scroll);
-        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height));
+        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height, total));
     }
 }
 
