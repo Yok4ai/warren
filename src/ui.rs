@@ -1068,8 +1068,18 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(tabblock, tabcol);
 
     // Reserve a column for the scrollbar (house style, toggled by alt+s) when there's history.
-    let (sb_off, sb_max) = app.panel.active().map(|t| t.scrollback_state()).unwrap_or((0, 0));
-    let show_term_sb = app.show_scrollbar && sb_max > 0 && content.width > 1 && content.height > 1;
+    // No scrollbar for alternate-screen apps (vim/btop/ranger): they have no meaningful scrollback,
+    // and toggling the reserved column frame-to-frame would resize their PTY and corrupt the layout.
+    let (sb_off, sb_max, alt_screen) = app
+        .panel
+        .active()
+        .map(|t| {
+            let (o, m) = t.scrollback_state();
+            (o, m, t.in_alt_screen())
+        })
+        .unwrap_or((0, 0, false));
+    let show_term_sb =
+        app.show_scrollbar && !alt_screen && sb_max > 0 && content.width > 1 && content.height > 1;
     let term_content = if show_term_sb {
         Rect::new(content.x, content.y, content.width - 1, content.height)
     } else {

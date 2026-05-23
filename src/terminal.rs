@@ -137,7 +137,10 @@ impl TerminalPane {
     }
 
     pub fn send_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        if let Some(bytes) = key_to_bytes(code, mods) {
+        // In application-cursor-keys mode (DECCKM, set by ncurses apps like ranger/vim) the arrow
+        // and Home/End keys must be sent as SS3 (ESC O x) rather than CSI (ESC [ x).
+        let app_cursor = self.parser.lock().unwrap().screen().application_cursor();
+        if let Some(bytes) = key_to_bytes(code, mods, app_cursor) {
             self.write(&bytes);
         }
     }
@@ -314,8 +317,18 @@ fn csi_tilde(mods: KeyModifiers, num: u8) -> Vec<u8> {
     }
 }
 
+/// A cursor/Home/End key. In application-cursor-keys mode an unmodified key uses SS3 (ESC O x);
+/// otherwise (or when modified) it uses the CSI form so xterm-style modifier encoding still works.
+fn cursor_key(mods: KeyModifiers, letter: char, app_cursor: bool) -> Vec<u8> {
+    if app_cursor && mods.is_empty() {
+        format!("\x1bO{letter}").into_bytes()
+    } else {
+        csi_letter(mods, letter)
+    }
+}
+
 /// Translate a key event into the bytes a terminal app expects (matching xterm).
-fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
+fn key_to_bytes(code: KeyCode, mods: KeyModifiers, app_cursor: bool) -> Option<Vec<u8>> {
     let alt = mods.contains(KeyModifiers::ALT);
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let mut out: Vec<u8> = Vec::new();
@@ -360,12 +373,12 @@ fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
             out.push(if ctrl { 0x08 } else { 0x7f });
         }
         KeyCode::Esc => out.push(0x1b),
-        KeyCode::Up => out.extend_from_slice(&csi_letter(mods, 'A')),
-        KeyCode::Down => out.extend_from_slice(&csi_letter(mods, 'B')),
-        KeyCode::Right => out.extend_from_slice(&csi_letter(mods, 'C')),
-        KeyCode::Left => out.extend_from_slice(&csi_letter(mods, 'D')),
-        KeyCode::Home => out.extend_from_slice(&csi_letter(mods, 'H')),
-        KeyCode::End => out.extend_from_slice(&csi_letter(mods, 'F')),
+        KeyCode::Up => out.extend_from_slice(&cursor_key(mods, 'A', app_cursor)),
+        KeyCode::Down => out.extend_from_slice(&cursor_key(mods, 'B', app_cursor)),
+        KeyCode::Right => out.extend_from_slice(&cursor_key(mods, 'C', app_cursor)),
+        KeyCode::Left => out.extend_from_slice(&cursor_key(mods, 'D', app_cursor)),
+        KeyCode::Home => out.extend_from_slice(&cursor_key(mods, 'H', app_cursor)),
+        KeyCode::End => out.extend_from_slice(&cursor_key(mods, 'F', app_cursor)),
         KeyCode::PageUp => out.extend_from_slice(&csi_tilde(mods, 5)),
         KeyCode::PageDown => out.extend_from_slice(&csi_tilde(mods, 6)),
         KeyCode::Delete => out.extend_from_slice(&csi_tilde(mods, 3)),
