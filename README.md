@@ -5,14 +5,7 @@ reimplemented agent. File explorer, a lightweight editor with tabs and syntax hi
 embedded `claude` pane, multiple terminals, git, and **live accept/reject diffs** for the edits
 Claude proposes — all in one terminal, so you never leave it to juggle separate windows.
 
-```
-┌ Explorer ─┐┌ app.rs  ✎ main.rs ─────────────┐┌ 1 ─┐
-│ ▾ src     ││  1 fn main() {                 ││ +  │
-│   app.rs  ││  2     println!("hi");         ││    │
-│   ui.rs   ││  3 }                           ││    │   ← embedded `claude`,
-│ Cargo.toml││                                ││    │     shells, npm, btop…
-└───────────┘└────────────────────────────────┘└────┘
-```
+![warren](images/warren.png)
 
 Built with Rust + [ratatui](https://ratatui.rs). Runs on Linux and macOS.
 
@@ -68,15 +61,27 @@ a full-file inline diff with real line numbers — press `enter` to accept or `e
 |---|---|
 | `ctrl+q` | quit |
 | `ctrl+p` | command palette / fuzzy finder |
-| `ctrl+b` | toggle sidebar · `alt+e` toggle editor · `ctrl+g` source control |
-| `ctrl+w` | cycle focus between panes |
-| `ctrl+t` | new terminal · `` ctrl+` `` toggle terminal panel |
-| `ctrl+n` | new file · `ctrl+s` save · `ctrl+x` close tab |
-| `ctrl+pageup`/`pagedown` | previous / next tab |
-| `ctrl+z` / `ctrl+y` | undo / redo |
-| `ctrl+c` / `ctrl+v` | copy / paste · `ctrl+a` select all · `ctrl+f` find |
-| `alt+s` | toggle scrollbars · `alt+a` toggle auto-save |
 | `f1` | keybindings overlay |
+| **Panes** | |
+| `ctrl+b` | toggle sidebar |
+| `alt+e` | toggle editor |
+| `ctrl+g` | source control |
+| `ctrl+w` | cycle focus between panes |
+| `ctrl+t` | new terminal |
+| `` ctrl+` `` | toggle terminal panel |
+| **Files & tabs** | |
+| `ctrl+n` | new file |
+| `ctrl+s` | save |
+| `ctrl+x` | close tab |
+| `ctrl+pageup` / `ctrl+pagedown` | previous / next tab |
+| **Editing** | |
+| `ctrl+z` / `ctrl+y` | undo / redo |
+| `ctrl+c` / `ctrl+v` | copy / paste |
+| `ctrl+a` | select all |
+| `ctrl+f` | find |
+| **Toggles** | |
+| `alt+s` | toggle scrollbars |
+| `alt+a` | toggle auto-save |
 
 In a terminal pane: mouse-drag or `pageup`/`pagedown` scrolls the scrollback; drag selects text
 (copied on release); typing snaps back to live output.

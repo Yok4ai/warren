@@ -552,19 +552,65 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.editor.tabs.is_empty() {
         app.editor.viewport = 0;
         let km = &app.config.keymap;
-        let header = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "No file open",
-                Style::default().fg(dark().fg).bold(),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Pick a file in the explorer and press Enter, or:",
-                Style::default().fg(dark().fg),
-            )),
+
+        // Block-letter banner shown when no file is open (à la opencode's logo).
+        const BANNER: [&str; 5] = [
+            "██     ██  █████  ██████  ██████  ███████ ███    ██",
+            "██     ██ ██   ██ ██   ██ ██   ██ ██      ████   ██",
+            "██  █  ██ ███████ ██████  ██████  █████   ██ ██  ██",
+            "██ ███ ██ ██   ██ ██   ██ ██   ██ ██      ██  ██ ██",
+            " ███ ███  ██   ██ ██   ██ ██   ██ ███████ ██   ████",
+        ];
+        let banner_w = BANNER.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+
+        let [_, ba, meta, hbot] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(BANNER.len() as u16),
+            Constraint::Length(4),
+            Constraint::Min(0),
         ])
-        .alignment(Alignment::Center);
+        .areas(inner);
+
+        // Center the banner as a fixed-width block so the art stays aligned (fall back to a plain
+        // word if the pane is too narrow).
+        if inner.width >= banner_w {
+            let [_, bm, _] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(banner_w),
+                Constraint::Min(0),
+            ])
+            .areas(ba);
+            let banner: Vec<Line> = BANNER
+                .iter()
+                .map(|l| Line::from(Span::styled(*l, Style::default().fg(dark().accent).bold())))
+                .collect();
+            frame.render_widget(Paragraph::new(banner), bm);
+        } else {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "warren",
+                    Style::default().fg(dark().accent).bold(),
+                )))
+                .alignment(Alignment::Center),
+                ba,
+            );
+        }
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(dark().dim),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Pick a file in the explorer and press Enter, or:",
+                    Style::default().fg(dark().fg),
+                )),
+            ])
+            .alignment(Alignment::Center),
+            meta,
+        );
 
         // Right-align chords into a column, bullet, then bright left-aligned labels.
         let hint = |chord: String, label: &str| {
@@ -584,9 +630,6 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             hint(km.help.to_string(), "all keybindings"),
         ]);
 
-        let [htop, hbot] =
-            Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas(inner);
-        frame.render_widget(header, htop);
         // Center the aligned hint block as a fixed-width column.
         let [_, mid, _] = Layout::horizontal([
             Constraint::Min(0),
