@@ -88,3 +88,10 @@ pub fn cycle() -> &'static str {
     CURRENT.store(next, Ordering::Relaxed);
     THEMES[next].name
 }
+
+/// Select a specific theme by index.
+pub fn set(idx: usize) {
+    if idx < THEMES.len() {
+        CURRENT.store(idx, Ordering::Relaxed);
+    }
+}

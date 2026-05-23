@@ -1193,6 +1193,10 @@ impl App {
             Command::CycleTheme => {
                 self.status = format!("theme: {}", crate::theme::cycle());
             }
+            Command::SetTheme(i) => {
+                crate::theme::set(i);
+                self.status = format!("theme: {}", crate::theme::current().name);
+            }
             Command::Help => self.show_help = true,
             Command::Quit => self.should_quit = true,
         }

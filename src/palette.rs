@@ -20,14 +20,15 @@ pub enum Command {
     ToggleAutosave,
     ToggleSolidBg,
     CycleTheme,
+    SetTheme(usize),
     Help,
     Quit,
 }
 
-/// The command list shown in `>` mode (label → command).
-pub fn commands() -> Vec<(&'static str, Command)> {
+/// The command list shown in `>` mode (label → command), including a selector entry per theme.
+pub fn commands() -> Vec<(String, Command)> {
     use Command::*;
-    vec![
+    let mut v: Vec<(String, Command)> = [
         ("New file", NewFile),
         ("New terminal", NewTerminal),
         ("Toggle terminal panel", TogglePanel),
@@ -42,6 +43,13 @@ pub fn commands() -> Vec<(&'static str, Command)> {
         ("Help", Help),
         ("Quit", Quit),
     ]
+    .into_iter()
+    .map(|(l, c)| (l.to_string(), c))
+    .collect();
+    for (i, t) in crate::theme::THEMES.iter().enumerate() {
+        v.push((format!("Theme: {}", t.name), SetTheme(i)));
+    }
+    v
 }
 
 /// What the user picked.
@@ -89,7 +97,7 @@ impl Palette {
     pub fn refilter(&mut self) {
         let pat = Pattern::parse(self.query(), CaseMatching::Ignore, Normalization::Smart);
         self.results = if self.command_mode() {
-            let labels: Vec<String> = commands().into_iter().map(|(l, _)| l.to_string()).collect();
+            let labels: Vec<String> = commands().into_iter().map(|(l, _)| l).collect();
             pat.match_list(labels, &mut self.matcher)
                 .into_iter()
                 .map(|(s, _)| s)
