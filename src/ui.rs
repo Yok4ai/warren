@@ -274,6 +274,7 @@ fn border_color(focused: bool) -> Color {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.sidebar_sb = None;
     match app.sidebar_mode {
         SidebarMode::Explorer => draw_explorer(frame, app, area),
         SidebarMode::SourceControl => draw_scm(frame, app, area),
@@ -396,6 +397,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(visible), content);
     if show_sb {
         draw_scrollbar(frame, inner, total, off);
+        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height));
     }
 }
 
@@ -493,6 +495,7 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), content);
     if show_sb {
         draw_scrollbar(frame, inner, total, scroll);
+        app.sidebar_sb = Some((inner.x + inner.width - 1, inner.y, inner.height));
     }
 }
 
@@ -611,6 +614,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         body
     };
     app.editor.content_area = text_area;
+    app.editor.viewport_w = text_area.width as usize;
 
     let dw = digits as usize;
     let nums: Vec<Line> = (scroll..(scroll + text_area.height as usize).min(total))
@@ -629,7 +633,10 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         let start = buf.scroll.min(total.saturating_sub(1));
         let end = (start + text_area.height as usize).min(total);
         let visible: Vec<Line> = buf.lines[start..end].to_vec();
-        frame.render_widget(Paragraph::new(visible), text_area);
+        frame.render_widget(
+            Paragraph::new(visible).scroll((0, buf.hscroll as u16)),
+            text_area,
+        );
     }
 
     // Diff buffers: paint full-width green/red line backgrounds (added/removed).
@@ -657,11 +664,16 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     // than the hardware cursor) so the blink is uniform with the terminal pane.
     if let Some(buf) = app.editor.active_buffer() {
         let (cl, cc) = buf.cursor;
-        if cl >= buf.scroll && cl < buf.scroll + text_area.height as usize {
+        let col = cc.saturating_sub(buf.hscroll);
+        let on_screen = cl >= buf.scroll
+            && cl < buf.scroll + text_area.height as usize
+            && cc >= buf.hscroll
+            && (col as u16) < text_area.width;
+        if on_screen {
             let show = if focused { app.blink_on } else { true };
             if show {
                 let y = text_area.y + (cl - buf.scroll) as u16;
-                let x = text_area.x + (cc as u16).min(text_area.width.saturating_sub(1));
+                let x = text_area.x + col as u16;
                 let style = if focused {
                     Style::default().bg(DARK.accent).fg(Color::Black)
                 } else {
@@ -725,7 +737,9 @@ fn draw_selection(frame: &mut Frame, app: &App, content: Rect) {
     };
     let ((sl, sc), (el, ec)) = sel.normalized();
     let scroll = buf.scroll;
+    let hs = buf.hscroll;
     let height = content.height as usize;
+    let view_end = hs + content.width as usize;
     let style = Style::default().bg(DARK.sel_bg);
     for li in sl..=el {
         if li < scroll || li >= scroll + height {
@@ -734,16 +748,16 @@ fn draw_selection(frame: &mut Frame, app: &App, content: Rect) {
         let line_len = buf.line_text(li).chars().count();
         let start = if li == sl { sc } else { 0 }.min(line_len);
         let end = if li == el { ec } else { line_len }.min(line_len);
-        if end <= start {
+        // Intersect the selection with the horizontally-visible window.
+        let vstart = start.max(hs);
+        let vend = end.min(view_end);
+        if vend <= vstart {
             continue;
         }
         let y = content.y + (li - scroll) as u16;
-        let x = content.x + start as u16;
-        let max_w = content.width.saturating_sub(start as u16);
-        let w = ((end - start) as u16).min(max_w);
-        if w > 0 {
-            frame.buffer_mut().set_style(Rect::new(x, y, w, 1), style);
-        }
+        let x = content.x + (vstart - hs) as u16;
+        let w = (vend - vstart) as u16;
+        frame.buffer_mut().set_style(Rect::new(x, y, w, 1), style);
     }
 }
 

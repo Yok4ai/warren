@@ -38,7 +38,7 @@ Phased build of the TUI IDE. Design doc: `~/.claude/plans/i-want-you-to-ancient-
 - [ ] Inline accept/reject diff by impersonating Claude Code's IDE server (WS MCP via
       `~/.claude/ide/<pid>.lock`) — render claude's edits in our editor pane.
 - [ ] Multiple terminals, workspace tabs (bottom bar), markdown preview, GitHub auth.
-- [ ] Editor: undo/redo, horizontal scroll, explorer scrollbar.
+- [ ] Editor: undo/redo. (Horizontal scroll + sidebar scrollbars done.)
 
 ## Known constraints
 

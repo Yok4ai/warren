@@ -77,6 +77,10 @@ pub struct App {
     pub scm_selected: usize,
     /// Screen-row → SCM item index, set by the renderer for click mapping.
     pub scm_rows: Vec<(u16, usize)>,
+    /// Sidebar scrollbar geometry (column, top-row, height) when shown; for drag-to-scroll.
+    pub sidebar_sb: Option<(u16, u16, u16)>,
+    /// True while dragging the sidebar scrollbar.
+    dragging_sidebar_sb: bool,
     /// Sidebar width in columns (draggable).
     pub sidebar_width: u16,
     /// True while dragging the sidebar/editor divider.
@@ -165,6 +169,8 @@ impl App {
             scm_items: Vec::new(),
             scm_selected: 0,
             scm_rows: Vec::new(),
+            sidebar_sb: None,
+            dragging_sidebar_sb: false,
             sidebar_width: 32,
             resizing: false,
             dragging_scrollbar: false,
@@ -310,9 +316,10 @@ impl App {
             }
             self.editor.delete_selection();
             let vp = self.editor.viewport.max(1);
+        let vw = self.editor.viewport_w.max(1);
             if let Some(b) = self.editor.active_buffer_mut() {
                 b.insert_text(&text);
-                b.ensure_cursor_visible(vp);
+                b.ensure_cursor_visible(vp, vw);
             }
             self.needs_redraw = true;
         }
@@ -365,7 +372,10 @@ impl App {
                     self.resizing = true;
                 } else if in_sidebar {
                     self.focus = Focus::Sidebar;
-                    if self.sidebar_mode == SidebarMode::SourceControl {
+                    if self.on_sidebar_scrollbar(&m) {
+                        self.dragging_sidebar_sb = true;
+                        self.sidebar_sb_to(m.row);
+                    } else if self.sidebar_mode == SidebarMode::SourceControl {
                         self.scm_click(m.row);
                     } else if m.row >= 1 {
                         let idx = self.tree.scroll + (m.row as usize - 1);
@@ -415,7 +425,9 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.drag_source.is_some() {
+                if self.dragging_sidebar_sb {
+                    self.sidebar_sb_to(m.row);
+                } else if self.drag_source.is_some() {
                     // Dragging a file out of the explorer.
                     self.dragging = true;
                     self.drag_pos = (m.column, m.row);
@@ -448,7 +460,9 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(path) = self.drag_source.take() {
+                if self.dragging_sidebar_sb {
+                    self.dragging_sidebar_sb = false;
+                } else if let Some(path) = self.drag_source.take() {
                     if self.dragging {
                         self.handle_drop(&path, m.column, m.row);
                     } else {
@@ -550,7 +564,8 @@ impl App {
         }
         let buf = self.editor.active_buffer()?;
         let line = (buf.scroll + (m.row - ca.y) as usize).min(buf.line_count().saturating_sub(1));
-        let col = ((m.column - ca.x) as usize).min(buf.line_text(line).chars().count());
+        let col =
+            ((m.column - ca.x) as usize + buf.hscroll).min(buf.line_text(line).chars().count());
         Some((line, col))
     }
 
@@ -565,7 +580,7 @@ impl App {
         let col = m.column.clamp(ca.x, ca.x + ca.width - 1);
         let buf = self.editor.active_buffer()?;
         let line = (buf.scroll + (row - ca.y) as usize).min(buf.line_count().saturating_sub(1));
-        let c = ((col - ca.x) as usize).min(buf.line_text(line).chars().count());
+        let c = ((col - ca.x) as usize + buf.hscroll).min(buf.line_text(line).chars().count());
         Some((line, c))
     }
 
@@ -1240,6 +1255,39 @@ impl App {
         self.refresh_git();
     }
 
+    fn on_sidebar_scrollbar(&self, m: &MouseEvent) -> bool {
+        match self.sidebar_sb {
+            Some((col, y, h)) => m.column == col && m.row >= y && m.row < y + h,
+            None => false,
+        }
+    }
+
+    /// Drag the sidebar scrollbar: move the selection to the proportional position (which scrolls
+    /// the view via the selection-follows logic).
+    fn sidebar_sb_to(&mut self, row: u16) {
+        let Some((_, y, h)) = self.sidebar_sb else {
+            return;
+        };
+        if h <= 1 {
+            return;
+        }
+        let frac = (row.saturating_sub(y)) as f32 / (h - 1) as f32;
+        match self.sidebar_mode {
+            SidebarMode::Explorer => {
+                let n = self.tree.rows.len();
+                if n > 0 {
+                    self.tree.selected = ((frac * (n - 1) as f32).round() as usize).min(n - 1);
+                }
+            }
+            SidebarMode::SourceControl => {
+                let n = self.scm_items.len();
+                if n > 0 {
+                    self.scm_selected = ((frac * (n - 1) as f32).round() as usize).min(n - 1);
+                }
+            }
+        }
+    }
+
     /// Map a click row in the SCM sidebar to its item and activate it.
     fn scm_click(&mut self, row: u16) {
         if let Some(&(_, idx)) = self.scm_rows.iter().find(|(y, _)| *y == row) {
@@ -1288,6 +1336,7 @@ impl App {
         }
 
         let vp = self.editor.viewport.max(1);
+        let vw = self.editor.viewport_w.max(1);
 
         // Read-only buffers (diffs, commit details): movement/scroll only.
         if self.editor.active_buffer().map(|b| b.is_readonly()).unwrap_or(false) {
@@ -1308,7 +1357,7 @@ impl App {
                     }
                     _ => {}
                 }
-                b.ensure_cursor_visible(vp);
+                b.ensure_cursor_visible(vp, vw);
             }
             return;
         }
@@ -1343,7 +1392,7 @@ impl App {
             };
             if replaced {
                 if let Some(b) = self.editor.active_buffer_mut() {
-                    b.ensure_cursor_visible(vp);
+                    b.ensure_cursor_visible(vp, vw);
                 }
                 return;
             }
@@ -1421,7 +1470,7 @@ impl App {
                 _ => {}
             }
             if edited {
-                b.ensure_cursor_visible(vp);
+                b.ensure_cursor_visible(vp, vw);
             }
         }
         if edited {

@@ -46,6 +46,8 @@ pub struct Buffer {
     pub cursor: (usize, usize),
     /// Top visible line.
     pub scroll: usize,
+    /// Leftmost visible column (horizontal scroll).
+    pub hscroll: usize,
     /// Unsaved changes since the last load/save.
     pub modified: bool,
     /// When the buffer was last edited, used to debounce auto-save.
@@ -73,6 +75,7 @@ impl Buffer {
             highlight_dirty: false,
             cursor: (0, 0),
             scroll: 0,
+            hscroll: 0,
             modified: false,
             last_edit: Instant::now(),
             readonly: false,
@@ -113,6 +116,7 @@ impl Buffer {
             highlight_dirty: false,
             cursor: (0, 0),
             scroll: 0,
+            hscroll: 0,
             modified: false,
             last_edit: Instant::now(),
             readonly: true,
@@ -334,14 +338,20 @@ impl Buffer {
         self.cursor = (line, col.min(self.line_len(line)));
     }
 
-    pub fn ensure_cursor_visible(&mut self, height: usize) {
-        if height == 0 {
-            return;
+    pub fn ensure_cursor_visible(&mut self, height: usize, width: usize) {
+        if height > 0 {
+            if self.cursor.0 < self.scroll {
+                self.scroll = self.cursor.0;
+            } else if self.cursor.0 >= self.scroll + height {
+                self.scroll = self.cursor.0 + 1 - height;
+            }
         }
-        if self.cursor.0 < self.scroll {
-            self.scroll = self.cursor.0;
-        } else if self.cursor.0 >= self.scroll + height {
-            self.scroll = self.cursor.0 + 1 - height;
+        if width > 0 {
+            if self.cursor.1 < self.hscroll {
+                self.hscroll = self.cursor.1;
+            } else if self.cursor.1 >= self.hscroll + width {
+                self.hscroll = self.cursor.1 + 1 - width;
+            }
         }
     }
 
@@ -381,6 +391,8 @@ pub struct Editor {
     pub active: usize,
     /// Last rendered content height, used to clamp scrolling and paging.
     pub viewport: usize,
+    /// Last rendered content width, used to drive horizontal scrolling.
+    pub viewport_w: usize,
     /// Clickable tab regions from the last frame: (x_start, x_end_exclusive, tab_index).
     pub tab_hitboxes: Vec<(u16, u16, usize)>,
     /// Clickable close-button regions from the last frame: (x_start, x_end_exclusive, tab_index).
