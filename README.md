@@ -5,7 +5,9 @@ reimplemented agent. File explorer, a lightweight editor with tabs and syntax hi
 embedded `claude` pane, multiple terminals, git, and **live accept/reject diffs** for the edits
 Claude proposes — all in one terminal, so you never leave it to juggle separate windows.
 
-![warren](images/warren.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Yok4ai/warren/master/images/warren.png" alt="warren" width="900">
+</p>
 
 Built with Rust + [ratatui](https://ratatui.rs). Runs on Linux and macOS.
 
