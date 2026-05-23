@@ -232,7 +232,9 @@ impl Render {
             // syntax, but common, so pull the source out and reserve a band for it.
             Event::Html(h) | Event::InlineHtml(h) => {
                 if let Some((src, alt)) = extract_img(&h) {
-                    self.add_image(src, alt);
+                    if !is_decorative_img(&src) {
+                        self.add_image(src, alt);
+                    }
                 }
             }
             _ => {}
@@ -314,17 +316,20 @@ impl Render {
                 self.style = self.style.fg(th.accent).add_modifier(Modifier::UNDERLINED)
             }
             Tag::Image { dest_url, .. } => {
-                self.blank();
-                let line = self.lines.len();
-                for _ in 0..IMAGE_HEIGHT {
-                    self.lines.push(Line::raw(""));
+                // Decorative images (badges/SVG) can't be rendered; let their alt text flow inline.
+                if !is_decorative_img(&dest_url) {
+                    self.blank();
+                    let line = self.lines.len();
+                    for _ in 0..IMAGE_HEIGHT {
+                        self.lines.push(Line::raw(""));
+                    }
+                    self.images.push(ImageMark {
+                        line,
+                        height: IMAGE_HEIGHT,
+                        source: dest_url.to_string(),
+                    });
+                    self.img = Some((dest_url.to_string(), String::new()));
                 }
-                self.images.push(ImageMark {
-                    line,
-                    height: IMAGE_HEIGHT,
-                    source: dest_url.to_string(),
-                });
-                self.img = Some((dest_url.to_string(), String::new()));
             }
             Tag::BlockQuote(_) => {
                 self.blank();
@@ -520,6 +525,17 @@ impl Render {
 
 fn line_is_blank(l: &Line) -> bool {
     l.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+/// Whether an image source is a status badge or SVG (which the raster image decoder can't render,
+/// and which shouldn't claim a full image band in the preview).
+fn is_decorative_img(src: &str) -> bool {
+    let s = src.to_ascii_lowercase();
+    let path = s.split(['?', '#']).next().unwrap_or(&s);
+    s.contains("shields.io")
+        || s.contains("badgen.net")
+        || s.contains("/badge/")
+        || path.ends_with(".svg")
 }
 
 /// Extract `(src, alt)` from an HTML fragment containing an `<img …>` tag.
