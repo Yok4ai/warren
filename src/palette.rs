@@ -18,6 +18,8 @@ pub enum Command {
     SelectAll,
     ToggleScrollbar,
     ToggleAutosave,
+    ToggleSolidBg,
+    CycleTheme,
     Help,
     Quit,
 }
@@ -35,6 +37,8 @@ pub fn commands() -> Vec<(&'static str, Command)> {
         ("Select all", SelectAll),
         ("Toggle scrollbar", ToggleScrollbar),
         ("Toggle auto-save", ToggleAutosave),
+        ("Toggle solid background", ToggleSolidBg),
+        ("Cycle theme", CycleTheme),
         ("Help", Help),
         ("Quit", Quit),
     ]

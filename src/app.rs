@@ -101,6 +101,8 @@ pub struct App {
     pub show_scrollbar: bool,
     /// Whether modified buffers are auto-saved after a short idle delay.
     pub auto_save: bool,
+    /// Paint a solid theme background (overrides terminal transparency).
+    pub solid_bg: bool,
     /// Last known terminal width, for clamping resize drags.
     pub term_width: u16,
     /// Active modal prompt (e.g. new-file input), if any.
@@ -194,6 +196,7 @@ impl App {
             scrollbar_grab: 0,
             show_scrollbar: true,
             auto_save: false,
+            solid_bg: false,
             term_width: 80,
             prompt: None,
             close_confirm: None,
@@ -1178,6 +1181,17 @@ impl App {
                 } else {
                     "auto-save: off".into()
                 };
+            }
+            Command::ToggleSolidBg => {
+                self.solid_bg = !self.solid_bg;
+                self.status = if self.solid_bg {
+                    "solid background: on".into()
+                } else {
+                    "solid background: off".into()
+                };
+            }
+            Command::CycleTheme => {
+                self.status = format!("theme: {}", crate::theme::cycle());
             }
             Command::Help => self.show_help = true,
             Command::Quit => self.should_quit = true,

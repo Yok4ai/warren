@@ -11,11 +11,24 @@ use crate::prompt::Prompt;
 use ratatui::Frame;
 
 use crate::app::{App, Focus, ScmItem, SidebarMode};
-use crate::theme::DARK;
+use crate::theme;
+
+/// The active theme (switchable at runtime).
+fn dark() -> &'static theme::Theme {
+    theme::current()
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = frame.area().width;
     app.editor_hbar = None;
+    // Solid background: paint the whole area first so it shows through any pane that doesn't set
+    // its own background (overrides terminal transparency). Off by default.
+    if app.solid_bg {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(dark().bg)),
+            frame.area(),
+        );
+    }
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
@@ -95,7 +108,7 @@ fn draw_drag_label(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             label,
-            Style::default().bg(DARK.accent).fg(Color::Black).bold(),
+            Style::default().bg(dark().accent).fg(Color::Black).bold(),
         ))),
         rect,
     );
@@ -113,10 +126,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DARK.accent))
+        .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             " Keybindings — Esc to close ",
-            Style::default().fg(DARK.accent).bold(),
+            Style::default().fg(dark().accent).bold(),
         ));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -125,8 +138,8 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|(label, chord)| {
             Line::from(vec![
-                Span::styled(format!(" {:<14}", chord.to_string()), Style::default().fg(DARK.accent)),
-                Span::styled((*label).to_string(), Style::default().fg(DARK.fg)),
+                Span::styled(format!(" {:<14}", chord.to_string()), Style::default().fg(dark().accent)),
+                Span::styled((*label).to_string(), Style::default().fg(dark().fg)),
             ])
         })
         .collect();
@@ -144,20 +157,20 @@ fn draw_confirm(frame: &mut Frame, name: &str, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DARK.accent))
+        .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             " Unsaved changes ",
-            Style::default().fg(DARK.accent).bold(),
+            Style::default().fg(dark().accent).bold(),
         ));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let key = |k: &'static str| Span::styled(k, Style::default().fg(DARK.accent).bold());
-    let dim = |t: &str| Span::styled(t.to_string(), Style::default().fg(DARK.dim));
+    let key = |k: &'static str| Span::styled(k, Style::default().fg(dark().accent).bold());
+    let dim = |t: &str| Span::styled(t.to_string(), Style::default().fg(dark().dim));
     let lines = vec![
         Line::from(Span::styled(
             format!("{name} has unsaved changes."),
-            Style::default().fg(DARK.fg),
+            Style::default().fg(dark().fg),
         )),
         Line::from(""),
         Line::from(vec![
@@ -188,8 +201,8 @@ fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DARK.accent))
-        .title(Span::styled(title, Style::default().fg(DARK.accent).bold()));
+        .border_style(Style::default().fg(dark().accent))
+        .title(Span::styled(title, Style::default().fg(dark().accent).bold()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -200,13 +213,13 @@ fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "search files…",
-                Style::default().fg(DARK.dim),
+                Style::default().fg(dark().dim),
             )),
             input_row,
         );
     } else {
         frame.render_widget(
-            Paragraph::new(Span::styled(p.input.as_str(), Style::default().fg(DARK.fg))),
+            Paragraph::new(Span::styled(p.input.as_str(), Style::default().fg(dark().fg))),
             input_row,
         );
     }
@@ -230,10 +243,10 @@ fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
             if i == p.selected {
                 Line::from(Span::styled(
                     format!("{s:<width$}"),
-                    Style::default().bg(DARK.accent).fg(Color::Black),
+                    Style::default().bg(dark().accent).fg(Color::Black),
                 ))
             } else {
-                Line::from(Span::styled(s.clone(), Style::default().fg(DARK.fg)))
+                Line::from(Span::styled(s.clone(), Style::default().fg(dark().fg)))
             }
         })
         .collect();
@@ -251,15 +264,15 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DARK.accent))
+        .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             format!(" {} ", prompt.title),
-            Style::default().fg(DARK.accent).bold(),
+            Style::default().fg(dark().accent).bold(),
         ));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(
-        Paragraph::new(prompt.input.as_str()).style(Style::default().fg(DARK.fg)),
+        Paragraph::new(prompt.input.as_str()).style(Style::default().fg(dark().fg)),
         inner,
     );
     let cx = inner.x + (prompt.cursor as u16).min(inner.width.saturating_sub(1));
@@ -268,9 +281,9 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt, area: Rect) {
 
 fn border_color(focused: bool) -> Color {
     if focused {
-        DARK.accent
+        dark().accent
     } else {
-        DARK.border
+        dark().border
     }
 }
 
@@ -293,7 +306,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color(focused)))
-        .title(Span::styled(title, Style::default().fg(DARK.accent).bold()));
+        .title(Span::styled(title, Style::default().fg(dark().accent).bold()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -301,7 +314,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "not a git repository",
-                Style::default().fg(DARK.dim),
+                Style::default().fg(dark().dim),
             )),
             inner,
         );
@@ -316,7 +329,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(Span::styled(
         format!("CHANGES ({n_changes})"),
-        Style::default().fg(DARK.dim).bold(),
+        Style::default().fg(dark().dim).bold(),
     )));
     for (idx, item) in app.scm_items.iter().enumerate() {
         let sel = idx == app.scm_selected;
@@ -330,7 +343,7 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(Line::raw(""));
                     lines.push(Line::from(Span::styled(
                         "GRAPH",
-                        Style::default().fg(DARK.dim).bold(),
+                        Style::default().fg(dark().dim).bold(),
                     )));
                     graph_emitted = true;
                 }
@@ -343,9 +356,9 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
                 let text = format!("{twisty} {} · {} · {}  {}", c.short, c.author, c.when, c.summary);
                 let text: String = text.chars().take(width).collect();
                 let style = if sel {
-                    Style::default().bg(DARK.accent).fg(Color::Black)
+                    Style::default().bg(dark().accent).fg(Color::Black)
                 } else {
-                    Style::default().fg(DARK.fg)
+                    Style::default().fg(dark().fg)
                 };
                 item_line.push((lines.len(), idx));
                 lines.push(Line::from(Span::styled(
@@ -357,9 +370,9 @@ fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
                 let text = format!("      {code} {path}");
                 let text: String = text.chars().take(width).collect();
                 let style = if sel {
-                    Style::default().bg(DARK.accent).fg(Color::Black)
+                    Style::default().bg(dark().accent).fg(Color::Black)
                 } else {
-                    Style::default().fg(DARK.dim)
+                    Style::default().fg(dark().dim)
                 };
                 item_line.push((lines.len(), idx));
                 lines.push(Line::from(Span::styled(
@@ -420,16 +433,16 @@ fn scm_change_line(ch: &crate::git::Change, selected: bool, width: usize) -> Lin
         let text: String = text.chars().take(width).collect();
         Line::from(Span::styled(
             format!("{text:<width$}"),
-            Style::default().bg(DARK.accent).fg(Color::Black),
+            Style::default().bg(dark().accent).fg(Color::Black),
         ))
     } else {
         Line::from(vec![
             Span::styled(
                 dot.to_string(),
-                Style::default().fg(if ch.staged { Color::Green } else { DARK.dim }),
+                Style::default().fg(if ch.staged { Color::Green } else { dark().dim }),
             ),
             Span::styled(format!("{} ", ch.code), Style::default().fg(code_color)),
-            Span::styled(ch.path.clone(), Style::default().fg(DARK.fg)),
+            Span::styled(ch.path.clone(), Style::default().fg(dark().fg)),
         ])
     }
 }
@@ -441,7 +454,7 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(border_color(focused)))
         .title(Span::styled(
             " Explorer ",
-            Style::default().fg(DARK.accent).bold(),
+            Style::default().fg(dark().accent).bold(),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -485,16 +498,16 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
             if i == app.tree.selected {
                 // Pad to full width so the selection bar spans the pane.
                 let style = if focused {
-                    Style::default().bg(DARK.accent).fg(Color::Black)
+                    Style::default().bg(dark().accent).fg(Color::Black)
                 } else {
-                    Style::default().bg(DARK.status_bg).fg(DARK.fg)
+                    Style::default().bg(dark().status_bg).fg(dark().fg)
                 };
                 Line::from(Span::styled(format!("{label:<width$}"), style))
             } else {
                 let style = if row.is_dir {
-                    Style::default().fg(DARK.accent)
+                    Style::default().fg(dark().accent)
                 } else {
-                    Style::default().fg(DARK.fg)
+                    Style::default().fg(dark().fg)
                 };
                 Line::from(Span::styled(label, style))
             }
@@ -523,21 +536,21 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::from(""),
             Line::from(Span::styled(
                 "No file open",
-                Style::default().fg(DARK.fg).bold(),
+                Style::default().fg(dark().fg).bold(),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Pick a file in the explorer and press Enter, or:",
-                Style::default().fg(DARK.dim),
+                Style::default().fg(dark().fg),
             )),
         ])
         .alignment(Alignment::Center);
 
-        // Right-align chords into a column, bullet, then left-aligned labels.
+        // Right-align chords into a column, bullet, then bright left-aligned labels.
         let hint = |chord: String, label: &str| {
             Line::from(vec![
-                Span::styled(format!("{chord:>6}"), Style::default().fg(DARK.accent).bold()),
-                Span::styled(format!("  • {label}"), Style::default().fg(DARK.dim)),
+                Span::styled(format!("{chord:>6}"), Style::default().fg(dark().accent).bold()),
+                Span::styled(format!("  • {label}"), Style::default().fg(Color::White)),
             ])
         };
         let hints = Paragraph::new(vec![
@@ -547,6 +560,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             hint(km.toggle_panel.to_string(), "toggle terminal panel"),
             hint(km.toggle_sidebar.to_string(), "toggle sidebar"),
             hint(km.toggle_editor.to_string(), "toggle editor"),
+            hint(km.toggle_scm.to_string(), "source control"),
             hint(km.help.to_string(), "all keybindings"),
         ]);
 
@@ -585,16 +599,16 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         let body = format!(" {marker}{name} ");
         let bw = body.chars().count() as u16;
         let body_style = if *i == active {
-            Style::default().fg(DARK.accent).bold()
+            Style::default().fg(dark().accent).bold()
         } else {
-            Style::default().fg(DARK.dim)
+            Style::default().fg(dark().dim)
         };
         spans.push(Span::styled(body, body_style));
         tab_hb.push((x, x + bw, *i));
 
         let close = "✕ ";
         let cw = close.chars().count() as u16;
-        spans.push(Span::styled(close, Style::default().fg(DARK.dim)));
+        spans.push(Span::styled(close, Style::default().fg(dark().dim)));
         close_hb.push((x + bw, x + bw + cw, *i));
         x += bw + cw;
     }
@@ -643,9 +657,9 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let nums: Vec<Line> = (scroll..(scroll + text_area.height as usize).min(total))
         .map(|i| {
             let style = if i == cursor_line && focused {
-                Style::default().fg(DARK.accent)
+                Style::default().fg(dark().accent)
             } else {
-                Style::default().fg(DARK.dim)
+                Style::default().fg(dark().dim)
             };
             Line::from(Span::styled(format!("{:>dw$} ", i + 1), style))
         })
@@ -669,9 +683,9 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             let end = (start + text_area.height as usize).min(total);
             for li in start..end {
                 let style = match buf.line_text(li).chars().next() {
-                    Some('+') => Style::default().bg(DARK.diff_add_bg).fg(DARK.diff_add_fg),
-                    Some('-') => Style::default().bg(DARK.diff_del_bg).fg(DARK.diff_del_fg),
-                    Some('@') => Style::default().fg(DARK.accent),
+                    Some('+') => Style::default().bg(dark().diff_add_bg).fg(dark().diff_add_fg),
+                    Some('-') => Style::default().bg(dark().diff_del_bg).fg(dark().diff_del_fg),
+                    Some('@') => Style::default().fg(dark().accent),
                     _ => continue,
                 };
                 let y = text_area.y + (li - buf.scroll) as u16;
@@ -698,9 +712,9 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                 let y = text_area.y + (cl - buf.scroll) as u16;
                 let x = text_area.x + col as u16;
                 let style = if focused {
-                    Style::default().bg(DARK.accent).fg(Color::Black)
+                    Style::default().bg(dark().accent).fg(Color::Black)
                 } else {
-                    Style::default().bg(DARK.dim).fg(Color::Black)
+                    Style::default().bg(dark().dim).fg(Color::Black)
                 };
                 frame
                     .buffer_mut()
@@ -734,9 +748,9 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         for i in 0..track {
             let on_thumb = i >= thumb_x && i < thumb_x + thumb;
             let (sym, color) = if on_thumb {
-                ("█", DARK.dim)
+                ("█", dark().dim)
             } else {
-                ("─", DARK.border)
+                ("─", dark().border)
             };
             if let Some(cell) = bufm.cell_mut((body.x + i as u16, y)) {
                 cell.set_symbol(sym).set_fg(color);
@@ -766,9 +780,9 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, scroll: usize) {
     for i in 0..track {
         let on_thumb = i >= thumb_pos && i < thumb_pos + thumb;
         let (symbol, color) = if on_thumb {
-            ("█", DARK.dim)
+            ("█", dark().dim)
         } else {
-            ("│", DARK.border)
+            ("│", dark().border)
         };
         if let Some(cell) = buf.cell_mut((col, area.y + i as u16)) {
             cell.set_symbol(symbol).set_fg(color);
@@ -790,7 +804,7 @@ fn draw_selection(frame: &mut Frame, app: &App, content: Rect) {
     let hs = buf.hscroll;
     let height = content.height as usize;
     let view_end = hs + content.width as usize;
-    let style = Style::default().bg(DARK.sel_bg);
+    let style = Style::default().bg(dark().sel_bg);
     for li in sl..=el {
         if li < scroll || li >= scroll + height {
             continue;
@@ -816,13 +830,13 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
     let km = &app.config.keymap;
     let hint = |chord: String, label: &str| {
         Line::from(vec![
-            Span::styled(chord, Style::default().fg(DARK.accent).bold()),
-            Span::styled(format!("  {label}"), Style::default().fg(DARK.dim)),
+            Span::styled(chord, Style::default().fg(dark().accent).bold()),
+            Span::styled(format!("  {label}"), Style::default().fg(dark().dim)),
         ])
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DARK.border));
+        .border_style(Style::default().fg(dark().border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
@@ -830,7 +844,7 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(""),
             Line::from(Span::styled(
                 "All panes hidden",
-                Style::default().fg(DARK.fg).bold(),
+                Style::default().fg(dark().fg).bold(),
             )),
             Line::from(""),
             hint(km.toggle_editor.to_string(), "show editor"),
@@ -879,12 +893,12 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, t)| {
             let label: String = format!(" {}", t.name).chars().take(avail).collect();
             let (name_style, x_style) = if i == active {
-                let s = Style::default().bg(DARK.accent).fg(Color::Black);
+                let s = Style::default().bg(dark().accent).fg(Color::Black);
                 (s, s)
             } else {
                 (
-                    Style::default().fg(DARK.fg),
-                    Style::default().fg(DARK.dim),
+                    Style::default().fg(dark().fg),
+                    Style::default().fg(dark().dim),
                 )
             };
             Line::from(vec![
@@ -895,7 +909,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     lines.push(Line::from(Span::styled(
         format!("{:<w$}", " + new"),
-        Style::default().fg(DARK.accent),
+        Style::default().fg(dark().accent),
     )));
     frame.render_widget(Paragraph::new(lines), strip);
 
@@ -906,7 +920,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         // Cursor blinks (via visibility) when the panel is focused; hidden otherwise.
         let cursor = tui_term::widget::Cursor::default()
             .visibility(focused && blink)
-            .overlay_style(Style::default().bg(DARK.accent).fg(Color::Black));
+            .overlay_style(Style::default().bg(dark().accent).fg(Color::Black));
         let term = tui_term::widget::PseudoTerminal::new(parser.screen()).cursor(cursor);
         frame.render_widget(term, content);
     }
@@ -914,7 +928,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let km = &app.config.keymap;
-    let bg = Style::default().bg(DARK.status_bg).fg(DARK.status_fg);
+    let bg = Style::default().bg(dark().status_bg).fg(dark().status_fg);
 
     let focus = match app.focus {
         Focus::Sidebar => "EXPLORER",
@@ -922,7 +936,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Focus::Terminal => "CLAUDE",
     };
     let left = Line::from(vec![
-        Span::styled(format!(" {focus} "), bg.fg(DARK.accent).bold()),
+        Span::styled(format!(" {focus} "), bg.fg(dark().accent).bold()),
         Span::styled(format!("{} ", app.status), bg),
     ]);
     let right = Line::from(Span::styled(
