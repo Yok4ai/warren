@@ -121,6 +121,8 @@ pub struct Keymap {
     pub toggle_preview: KeyChord,
     pub toggle_panel: KeyChord,
     pub help: KeyChord,
+    /// Send the active file (and selected line range) to Claude as an `@`-mention.
+    pub mention: KeyChord,
 }
 
 impl Default for Keymap {
@@ -151,6 +153,7 @@ impl Default for Keymap {
             toggle_preview: KeyChord::new(Char('m'), KeyModifiers::ALT),
             toggle_panel: KeyChord::new(Char('`'), ctrl),
             help: KeyChord::new(F(1), KeyModifiers::NONE),
+            mention: KeyChord::new(Char('c'), KeyModifiers::ALT),
         }
     }
 }
@@ -179,6 +182,7 @@ impl Keymap {
             ("Command palette", self.command_palette),
             ("New terminal", self.new_terminal),
             ("Toggle terminal panel", self.toggle_panel),
+            ("Mention file → Claude", self.mention),
             ("Help", self.help),
             ("Quit", self.quit),
         ]
@@ -213,6 +217,7 @@ impl Keymap {
                 "toggle_autosave" => self.toggle_autosave = chord,
                 "toggle_preview" => self.toggle_preview = chord,
                 "toggle_panel" => self.toggle_panel = chord,
+                "mention" => self.mention = chord,
                 "help" => self.help = chord,
                 _ => {}
             }

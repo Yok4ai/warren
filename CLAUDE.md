@@ -46,6 +46,14 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - `palette.rs` — fuzzy file finder + command mode (nucleo-matcher).
 - `git.rs` — `git2` (no-TLS): status, log, diffs, commit-files, stage/unstage, commit.
 - `prompt.rs` — reusable modal single-line input (currently new-file).
+- `ide.rs` — impersonates the editor Claude Code connects to. On startup writes
+  `~/.claude/ide/<port>.lock` and serves MCP over WebSocket (`tokio-tungstenite`). Handles
+  `openDiff` (→ `AppEvent::OpenDiff` + a oneshot the run loop replies on after accept/reject) and
+  `closeAllDiffTabs`; answers `getDiagnostics` with `[]` (no LSP). Also **pushes** editor state to
+  Claude via notifications — `selection_changed` (auto, every tick the selection changes) and
+  `at_mentioned` (the `mention` key). Wire format is 0-based line/char. Every frame logged to
+  `~/.claude/warren-ide.log`. (The pull tools getOpenEditors/getCurrentSelection/getWorkspaceFolders
+  aren't called by Claude ≥2.1 — push, don't advertise them.)
 - `theme.rs` — the single built-in dark theme.
 - `ui.rs` — all rendering: sidebar + editor (tabs/content/selection/scrollbar) + statusline
   + prompt overlay. Writes back per-frame geometry (hitboxes, content area) used for mouse mapping.
@@ -78,7 +86,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 `ctrl+q` quit · `ctrl+p` palette · `ctrl+b` toggle sidebar · `ctrl+g` source control
 · `alt+e` toggle editor · `ctrl+w` cycle focus
 · `ctrl+n` new file · `ctrl+s` save · `ctrl+x` close tab · `ctrl+pageup/pagedown` prev/next tab
-· `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `alt+m` toggle markdown preview · `f1` keybindings overlay.
+· `alt+s` toggle scrollbar · `alt+a` toggle auto-save · `alt+m` toggle markdown preview
+· `alt+c` mention active file/selection to Claude · `f1` keybindings overlay.
 Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run
 `claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
 Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel

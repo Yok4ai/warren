@@ -33,11 +33,16 @@ Phased build of the TUI IDE. Design doc: `~/.claude/plans/i-want-you-to-ancient-
       that file's diff. Diffs render with green/red line backgrounds. Sidebar scrollbars.
       (`git2 0.19`, no TLS — push/pull deferred.)
 
+- [x] **Phase 7 — IDE integration (`ide.rs`).** warren impersonates the editor Claude connects to
+      (lockfile + MCP/WS). `openDiff` → accept/reject diff in the editor pane (⏎/Esc), queued so
+      overlapping edits don't drop. Editor state pushed to Claude: `selection_changed` (auto) +
+      `at_mentioned` (`alt+c`); `getDiagnostics` answered empty (no LSP). Protocol shapes
+      reverse-engineered from the CLI bundle; notification builders unit-tested.
+
 ## Later / deferred
 
-- [ ] Inline accept/reject diff by impersonating Claude Code's IDE server (WS MCP via
-      `~/.claude/ide/<pid>.lock`) — render claude's edits in our editor pane.
-- [ ] Multiple terminals, workspace tabs (bottom bar), markdown preview, GitHub auth.
+- [ ] Per-hunk accept/reject (currently whole-file), and FILE_SAVED with in-pane edits.
+- [ ] Workspace tabs (bottom bar), GitHub auth (push/pull needs TLS).
 - (Done: undo/redo, copy/paste, horizontal scroll, sidebar scrollbars, themes + solid bg,
   incremental highlighting.)
 

@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,12 +28,51 @@ pub enum DiffDecision {
 pub struct IdeServer {
     pub port: u16,
     lockfile: PathBuf,
+    /// Fan-out of outbound JSON-RPC notifications to every connected Claude client.
+    notify: broadcast::Sender<String>,
+}
+
+impl IdeServer {
+    /// Push a JSON-RPC notification (e.g. `selection_changed`) to all connected clients.
+    /// Best-effort: drops silently when nobody is listening.
+    pub fn notify(&self, msg: String) {
+        let _ = self.notify.send(msg);
+    }
 }
 
 impl Drop for IdeServer {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.lockfile);
     }
+}
+
+/// Build a `selection_changed` notification — tells Claude what the user is looking at right now.
+/// Line/character are 0-based (VS Code Position convention); pass `start == end` for a bare cursor.
+pub fn selection_changed(file: &str, start: (usize, usize), end: (usize, usize), text: &str) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "selection_changed",
+        "params": {
+            "selection": {
+                "start": { "line": start.0, "character": start.1 },
+                "end": { "line": end.0, "character": end.1 },
+            },
+            "text": text,
+            "filePath": file,
+        },
+    })
+    .to_string()
+}
+
+/// Build an `at_mentioned` notification — the explicit "reference this file (lines) in the prompt"
+/// action. Lines are 0-based; Claude renders them 1-based as `@file#L…`. `None` mentions the whole file.
+pub fn at_mentioned(file: &str, lines: Option<(usize, usize)>) -> String {
+    let mut params = json!({ "filePath": file });
+    if let Some((start, end)) = lines {
+        params["lineStart"] = json!(start);
+        params["lineEnd"] = json!(end);
+    }
+    json!({ "jsonrpc": "2.0", "method": "at_mentioned", "params": params }).to_string()
 }
 
 fn home() -> Option<PathBuf> {
@@ -75,17 +115,27 @@ pub async fn start(workspace: PathBuf, tx: UnboundedSender<AppEvent>) -> Option<
     std::fs::write(&lockfile, body.to_string()).ok()?;
     log(&format!("ide server listening on {port}, lockfile {lockfile:?}"));
 
+    let (notify, _) = broadcast::channel::<String>(64);
+    let accept_notify = notify.clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let tx = tx.clone();
-            tokio::spawn(handle_conn(stream, tx));
+            tokio::spawn(handle_conn(stream, tx, accept_notify.subscribe()));
         }
     });
 
-    Some(IdeServer { port, lockfile })
+    Some(IdeServer {
+        port,
+        lockfile,
+        notify,
+    })
 }
 
-async fn handle_conn(stream: tokio::net::TcpStream, tx: UnboundedSender<AppEvent>) {
+async fn handle_conn(
+    stream: tokio::net::TcpStream,
+    tx: UnboundedSender<AppEvent>,
+    mut notify_rx: broadcast::Receiver<String>,
+) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -95,25 +145,42 @@ async fn handle_conn(stream: tokio::net::TcpStream, tx: UnboundedSender<AppEvent
     };
     log("client connected");
     let (mut sink, mut stream) = ws.split();
-    while let Some(msg) = stream.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
-        };
-        let text = match msg {
-            Message::Text(t) => t.to_string(),
-            Message::Ping(p) => {
-                let _ = sink.send(Message::Pong(p)).await;
-                continue;
-            }
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        log(&format!("<< {text}"));
-        if let Some(resp) = handle_message(&text, &tx).await {
-            log(&format!(">> {resp}"));
-            if sink.send(Message::Text(resp.into())).await.is_err() {
-                break;
+    // One task owns the sink; multiplex inbound requests against app-pushed notifications so
+    // warren can speak spontaneously (selection_changed/at_mentioned), not just reply.
+    loop {
+        tokio::select! {
+            note = notify_rx.recv() => match note {
+                Ok(text) => {
+                    log(&format!(">> (notify) {text}"));
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            msg = stream.next() => {
+                let Some(msg) = msg else { break };
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let text = match msg {
+                    Message::Text(t) => t.to_string(),
+                    Message::Ping(p) => {
+                        let _ = sink.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                log(&format!("<< {text}"));
+                if let Some(resp) = handle_message(&text, &tx).await {
+                    log(&format!(">> {resp}"));
+                    if sink.send(Message::Text(resp.into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -140,7 +207,11 @@ async fn handle_message(text: &str, tx: &UnboundedSender<AppEvent>) -> Option<St
                 }),
             ))
         }
-        "notifications/initialized" => None,
+        "notifications/initialized" => {
+            // Client is ready; re-sync editor state so a mid-session connect knows the selection.
+            let _ = tx.send(AppEvent::IdeConnected);
+            None
+        }
         "tools/list" => Some(reply(id, json!({ "tools": tool_defs() }))),
         "tools/call" => {
             let name = v["params"]["name"].as_str().unwrap_or("");
@@ -214,13 +285,52 @@ fn tool_defs() -> Value {
           "inputSchema": { "type": "object", "properties": { "tab_name": str_prop() } } },
         { "name": "closeAllDiffTabs", "description": "Close all diff tabs.",
           "inputSchema": { "type": "object", "properties": {} } },
+        // Claude (2.1.x) polls getDiagnostics; warren has no language server, so the call is
+        // handled with an empty result. The pull tools getOpenEditors/getCurrentSelection/
+        // getWorkspaceFolders aren't called by current Claude — editor state is pushed instead
+        // via the `selection_changed`/`at_mentioned` notifications (see `selection_changed`).
         { "name": "getDiagnostics", "description": "Get language diagnostics.",
           "inputSchema": { "type": "object", "properties": { "uri": str_prop() } } },
-        { "name": "getOpenEditors", "description": "List open editors.",
-          "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "getWorkspaceFolders", "description": "List workspace folders.",
-          "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "getCurrentSelection", "description": "Get the current selection.",
-          "inputSchema": { "type": "object", "properties": {} } },
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The notification shapes are reverse-engineered from Claude's zod schemas in the CLI bundle;
+    // these guard the exact field names/nesting Claude validates against (a typo = silently ignored).
+
+    #[test]
+    fn selection_changed_matches_schema() {
+        let v: Value =
+            serde_json::from_str(&selection_changed("/tmp/a.rs", (3, 5), (4, 0), "hi")).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "selection_changed");
+        // Notification: no `id` field.
+        assert!(v.get("id").is_none());
+        let p = &v["params"];
+        assert_eq!(p["filePath"], "/tmp/a.rs");
+        assert_eq!(p["text"], "hi");
+        // 0-based line/character (Claude adds 1 for display).
+        assert_eq!(p["selection"]["start"]["line"], 3);
+        assert_eq!(p["selection"]["start"]["character"], 5);
+        assert_eq!(p["selection"]["end"]["line"], 4);
+        assert_eq!(p["selection"]["end"]["character"], 0);
+    }
+
+    #[test]
+    fn at_mentioned_with_and_without_lines() {
+        let with: Value =
+            serde_json::from_str(&at_mentioned("/tmp/a.rs", Some((2, 9)))).unwrap();
+        assert_eq!(with["method"], "at_mentioned");
+        assert_eq!(with["params"]["filePath"], "/tmp/a.rs");
+        assert_eq!(with["params"]["lineStart"], 2);
+        assert_eq!(with["params"]["lineEnd"], 9);
+
+        // Whole-file mention omits the line range entirely.
+        let whole: Value = serde_json::from_str(&at_mentioned("/tmp/a.rs", None)).unwrap();
+        assert!(whole["params"].get("lineStart").is_none());
+        assert!(whole["params"].get("lineEnd").is_none());
+    }
 }

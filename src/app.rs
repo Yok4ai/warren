@@ -1,6 +1,6 @@
 //! Application state and the central run loop.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,19 @@ struct PendingDiff {
     reply: oneshot::Sender<DiffDecision>,
     new_contents: String,
 }
+
+/// A diff Claude proposed while another is still on screen — held until the current one resolves,
+/// so its reply channel isn't dropped (which would hang Claude's `openDiff` call).
+struct QueuedDiff {
+    path: String,
+    new_contents: String,
+    tab_name: String,
+    reply: oneshot::Sender<DiffDecision>,
+}
+
+/// What was last reported to Claude as the active selection: `(file, start, end)` in
+/// `(line, char)` coordinates. Compared each tick to suppress redundant `selection_changed`.
+type SelectionKey = (PathBuf, (usize, usize), (usize, usize));
 
 /// Global application state. The run loop owns this and is the only writer.
 pub struct App {
@@ -163,11 +176,16 @@ pub struct App {
     pub editor_hbar: Option<(u16, u16, u16, usize, usize)>,
     dragging_hbar: bool,
     hbar_grab: i32,
-    /// IDE-integration server (impersonates the editor for Claude); held to keep it alive.
-    _ide: Option<IdeServer>,
+    /// IDE-integration server (impersonates the editor for Claude); held alive, and used to
+    /// push `selection_changed`/`at_mentioned` notifications.
+    ide: Option<IdeServer>,
     ide_port: Option<u16>,
     /// A diff Claude proposed, awaiting accept/reject.
     pending_diff: Option<PendingDiff>,
+    /// Further diffs proposed while one is on screen (presented one at a time on resolve).
+    diff_queue: VecDeque<QueuedDiff>,
+    /// Last selection pushed to Claude `(path, start, end)`, to avoid re-sending unchanged state.
+    last_selection: Option<SelectionKey>,
     /// Funnel sender, kept so panes spawned later can push events.
     pub(crate) tx: Option<UnboundedSender<AppEvent>>,
     pub status: String,
@@ -262,9 +280,11 @@ impl App {
             editor_hbar: None,
             dragging_hbar: false,
             hbar_grab: 0,
-            _ide: None,
+            ide: None,
             ide_port: None,
             pending_diff: None,
+            diff_queue: VecDeque::new(),
+            last_selection: None,
             tx: None,
             status: "ready".into(),
             should_quit: false,
@@ -284,7 +304,7 @@ impl App {
         // Impersonate the IDE so Claude shows its edits as accept/reject diffs in warren.
         if let Some(server) = ide::start(self.workspace.clone(), tx.clone()).await {
             self.ide_port = Some(server.port);
-            self._ide = Some(server);
+            self.ide = Some(server);
         }
         // Check GitHub for a newer release (and auto-apply it if enabled).
         update::spawn_check(tx.clone(), self.config.auto_update);
@@ -329,6 +349,7 @@ impl App {
             self.needs_redraw = true;
         }
         self.editor.refresh_highlight();
+        self.push_selection_if_changed();
         if self.auto_save && self.editor.autosave(Duration::from_millis(800)) {
             self.status = "auto-saved".into();
             self.needs_redraw = true;
@@ -362,14 +383,19 @@ impl App {
                 new_contents,
                 tab_name,
                 reply,
-            } => self.open_diff(path, new_contents, tab_name, reply),
+            } => self.enqueue_diff(path, new_contents, tab_name, reply),
             AppEvent::CloseDiff => {
+                // closeAllDiffTabs: reject the visible diff and everything queued behind it.
                 if let Some(pd) = self.pending_diff.take() {
                     let _ = pd.reply.send(DiffDecision::Reject);
+                }
+                for q in self.diff_queue.drain(..) {
+                    let _ = q.reply.send(DiffDecision::Reject);
                 }
                 self.close_diff_tab();
                 self.needs_redraw = true;
             }
+            AppEvent::IdeConnected => self.last_selection = None,
             AppEvent::ImageLoaded {
                 buffer,
                 source,
@@ -1075,6 +1101,8 @@ impl App {
             self.spawn_terminal();
         } else if km.toggle_panel.matches(c, m) {
             self.toggle_panel();
+        } else if km.mention.matches(c, m) {
+            self.mention_to_claude();
         } else {
             return false;
         }
@@ -1549,6 +1577,29 @@ impl App {
         self.focus = Focus::Editor;
     }
 
+    /// Accept a diff from Claude: show it now if the editor is free, else queue it. Only one diff
+    /// is on screen at a time; queueing keeps each request's reply channel alive until resolved.
+    fn enqueue_diff(
+        &mut self,
+        path: String,
+        new_contents: String,
+        tab_name: String,
+        reply: oneshot::Sender<DiffDecision>,
+    ) {
+        if self.pending_diff.is_some() {
+            self.diff_queue.push_back(QueuedDiff {
+                path,
+                new_contents,
+                tab_name,
+                reply,
+            });
+            self.status = format!("Claude queued an edit ({} waiting)", self.diff_queue.len());
+            self.needs_redraw = true;
+            return;
+        }
+        self.open_diff(path, new_contents, tab_name, reply);
+    }
+
     /// Show a proposed diff (old file on disk vs Claude's new contents) and await accept/reject.
     fn open_diff(
         &mut self,
@@ -1588,7 +1639,78 @@ impl App {
             let _ = pd.reply.send(decision);
             self.status = if accept { "accepted edit" } else { "rejected edit" }.into();
             self.close_diff_tab();
+            // Surface the next queued diff, if Claude proposed more than one.
+            if let Some(next) = self.diff_queue.pop_front() {
+                self.open_diff(next.path, next.new_contents, next.tab_name, next.reply);
+            }
         }
+    }
+
+    /// Push a JSON-RPC notification to the connected Claude (no-op if the IDE server isn't up).
+    fn ide_notify(&self, msg: String) {
+        if let Some(ide) = &self.ide {
+            ide.notify(msg);
+        }
+    }
+
+    /// The active editor file as `(absolute path, cursor)`, or `None` for synthetic buffers
+    /// (diffs, commit details) and unsaved scratch files — nothing meaningful to report to Claude.
+    fn reportable_buffer(&self) -> Option<(PathBuf, (usize, usize))> {
+        let buf = self.editor.active_buffer()?;
+        if buf.is_diff || buf.name.starts_with('✎') || !buf.path.is_absolute() {
+            return None;
+        }
+        Some((buf.path.clone(), buf.cursor))
+    }
+
+    /// Once per tick: tell Claude what the user is looking at via a `selection_changed`
+    /// notification, but only when it actually changed (cursor moved or selection altered).
+    fn push_selection_if_changed(&mut self) {
+        if self.ide.is_none() {
+            return;
+        }
+        let Some((path, cursor)) = self.reportable_buffer() else {
+            return;
+        };
+        let (start, end, text) = match self.editor.selection {
+            Some(sel) if !sel.is_empty() => {
+                let (s, e) = sel.normalized();
+                (s, e, self.editor.selected_text().unwrap_or_default())
+            }
+            _ => (cursor, cursor, String::new()),
+        };
+        let key = (path.clone(), start, end);
+        if self.last_selection.as_ref() == Some(&key) {
+            return;
+        }
+        self.last_selection = Some(key);
+        self.ide_notify(ide::selection_changed(
+            &path.to_string_lossy(),
+            start,
+            end,
+            &text,
+        ));
+    }
+
+    /// Explicitly reference the active file (and selected line range, if any) in Claude's prompt
+    /// via an `at_mentioned` notification — the keyboard equivalent of VS Code's "send to Claude".
+    fn mention_to_claude(&mut self) {
+        if self.ide.is_none() {
+            return;
+        }
+        let Some((path, _)) = self.reportable_buffer() else {
+            self.status = "nothing to mention".into();
+            return;
+        };
+        let lines = self.editor.selection.and_then(|sel| {
+            (!sel.is_empty()).then(|| {
+                let ((sl, _), (el, _)) = sel.normalized();
+                (sl, el)
+            })
+        });
+        self.ide_notify(ide::at_mentioned(&path.to_string_lossy(), lines));
+        self.status = "sent to Claude".into();
+        self.needs_redraw = true;
     }
 
     fn handle_pending_diff(&mut self, key: KeyEvent) {

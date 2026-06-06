@@ -30,6 +30,8 @@ pub enum AppEvent {
     },
     /// Claude asked to close the diff tab(s).
     CloseDiff,
+    /// Claude (re)connected over the IDE protocol; re-sync pushed editor state (selection).
+    IdeConnected,
     /// A markdown preview's remote image finished downloading: raw bytes for `source` in `buffer`.
     ImageLoaded {
         buffer: PathBuf,
