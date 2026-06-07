@@ -1,7 +1,6 @@
 //! Top-level rendering: sidebar (explorer) + editor area (tabs + content) + statusline.
 //! Phase 5 replaces the fixed sidebar|editor split with the recursive layout tree.
 
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -26,102 +25,145 @@ fn dark() -> &'static theme::Theme {
 /// Width of a collapsed pane's rail, in columns.
 const RAIL_W: u16 = 3;
 
-/// Header row + content area returned by [`pane_frame`].
-struct PaneFrame {
-    header: Rect,
-    content: Rect,
+/// Draw a full-width horizontal rule across `area`'s first row (pane separator).
+fn hrule(frame: &mut Frame, area: Rect) {
+    let buf = frame.buffer_mut();
+    for x in area.x..area.x + area.width {
+        if let Some(c) = buf.cell_mut((x, area.y)) {
+            c.set_symbol("─");
+            c.set_style(Style::default().fg(dark().border));
+        }
+    }
 }
 
-/// Draw a rounded pane with a filled accent title bar and a separator rule. Returns the header row
-/// (for control chips) and the content area below it. The shared look for every pane.
-fn pane_frame(frame: &mut Frame, area: Rect, title: &str, focused: bool) -> PaneFrame {
-    let bc = border_color(focused);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(bc));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return PaneFrame {
-            header: inner,
-            content: inner,
-        };
+/// Draw a single vertical divider down `col` across the body rows `[y, y+h)`.
+fn vrule(frame: &mut Frame, col: u16, y: u16, h: u16) {
+    let buf = frame.buffer_mut();
+    for r in y..y + h {
+        if let Some(c) = buf.cell_mut((col, r)) {
+            c.set_symbol("│");
+            c.set_style(Style::default().fg(dark().border));
+        }
     }
-    let header = Rect::new(inner.x, inner.y, inner.width, 1);
-    // Filled accent title bar (brighter when focused).
-    let bar = Style::default()
-        .bg(if focused { dark().accent } else { dark().border })
-        .fg(if focused { Color::Black } else { dark().fg })
-        .bold();
-    frame.buffer_mut().set_style(header, bar);
-    frame.render_widget(Paragraph::new(Line::from(format!(" {title}"))).style(bar), header);
-    // Separator rule (├───┤) under the header.
-    let content = if inner.height >= 2 {
-        let sy = inner.y + 1;
-        let buf = frame.buffer_mut();
-        for x in inner.x..inner.x + inner.width {
-            if let Some(c) = buf.cell_mut((x, sy)) {
-                c.set_symbol("─");
-                c.set_style(Style::default().fg(bc));
+}
+
+/// The global top app bar: the warren mark, a breadcrumb of the open file, and window controls
+/// (minimize the focused pane · zen · quit). Controls' hitboxes are stashed for mouse handling.
+fn draw_app_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let mut spans = vec![
+        Span::styled("▎", Style::default().fg(dark().accent)),
+        Span::styled("warren", Style::default().fg(dark().accent).bold()),
+        Span::raw("   "),
+    ];
+    // Breadcrumb of the active file, workspace-relative: dir › dir › file (file brighter).
+    if let Some(b) = app.editor.active_buffer() {
+        if b.path.is_absolute() {
+            let rel = b.path.strip_prefix(&app.workspace).unwrap_or(&b.path);
+            let parts: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let n = parts.len();
+            for (i, part) in parts.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" › ", Style::default().fg(dark().dim)));
+                }
+                let style = if i + 1 == n {
+                    Style::default().fg(dark().fg)
+                } else {
+                    Style::default().fg(dark().dim)
+                };
+                spans.push(Span::styled(part.clone(), style));
             }
         }
-        if let Some(c) = buf.cell_mut((area.x, sy)) {
-            c.set_symbol("├");
-        }
-        if let Some(c) = buf.cell_mut((area.x + area.width - 1, sy)) {
-            c.set_symbol("┤");
-        }
-        Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2))
-    } else {
-        Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1))
-    };
-    PaneFrame { header, content }
-}
-
-/// Draw a control chip (glyph) into a header bar at cell `(x, y)`; returns its hitbox cell.
-fn header_chip(buf: &mut Buffer, x: u16, y: u16, glyph: &str, focused: bool) -> (u16, u16) {
-    if let Some(c) = buf.cell_mut((x, y)) {
-        c.set_symbol(glyph);
-        c.set_style(
-            Style::default()
-                .bg(if focused { dark().accent } else { dark().border })
-                .fg(if focused { Color::Black } else { dark().fg })
-                .bold(),
-        );
     }
-    (x, y)
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Draw a collapsed pane as a thin accent rail: an expand chevron at the top and the pane name
-/// running vertically below it. Clicking anywhere on the rail (handled in app.rs) restores the pane.
-fn draw_rail(frame: &mut Frame, area: Rect, label: &str, chevron: char) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(dark().border));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+/// Draw a collapsed pane as a thin rail: an accent expand-button cap at the top and the pane name
+/// running vertically below it. The whole rail highlights on hover; clicking it restores the pane.
+fn draw_rail(frame: &mut Frame, area: Rect, label: &str, chevron: char, hover: (u16, u16)) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
+    let hovered = (area.x..area.x + area.width).contains(&hover.0)
+        && (area.y..area.y + area.height).contains(&hover.1);
+    let gs = chevron.to_string();
     let buf = frame.buffer_mut();
-    // Expand chevron in an accent cap at the top.
-    if let Some(cell) = buf.cell_mut((inner.x, inner.y)) {
-        cell.set_symbol(&chevron.to_string());
+    // Accent button cap at the top.
+    if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+        cell.set_symbol(&gs);
         cell.set_style(Style::default().bg(dark().accent).fg(Color::Black).bold());
     }
-    // Vertical label, one letter per row, starting a row below the chevron.
+    let label_fg = if hovered { dark().accent } else { dark().dim };
     for (i, ch) in label.chars().enumerate() {
-        let y = inner.y + 2 + i as u16;
-        if y >= inner.y + inner.height {
+        let y = area.y + 2 + i as u16;
+        if y >= area.y + area.height {
             break;
         }
-        if let Some(cell) = buf.cell_mut((inner.x, y)) {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
             cell.set_symbol(&ch.to_string());
-            cell.set_style(Style::default().fg(dark().accent));
+            cell.set_style(Style::default().fg(label_fg));
         }
     }
+}
+
+/// Draw a flat pane label header on the first row of `area`: the title (accent+bold when focused,
+/// dim otherwise) on the left and a collapse chevron on the right. Returns the content area below it
+/// and the chevron's hitbox cell (click to collapse the pane).
+fn pane_label(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    focused: bool,
+    collapse: char,
+    hover: (u16, u16),
+) -> (Rect, Option<(u16, u16)>) {
+    if area.height == 0 {
+        return (area, None);
+    }
+    let row = Rect::new(area.x, area.y, area.width, 1);
+    let style = if focused {
+        Style::default().fg(dark().accent).bold()
+    } else {
+        Style::default().fg(dark().dim)
+    };
+    frame.render_widget(Paragraph::new(Line::from(format!(" {title}"))).style(style), row);
+    let content = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+    (content, collapse_button(frame, area, collapse, hover))
+}
+
+/// Draw a collapse button — a 3-cell pill at the right of a header `area`'s first row — and return
+/// its center cell. The pill highlights (accent fill) when the mouse hovers it, otherwise it's a
+/// subtle raised chip with an accent chevron. Clicks across its width count (see `hit_chevron`).
+fn collapse_button(frame: &mut Frame, area: Rect, glyph: char, hover: (u16, u16)) -> Option<(u16, u16)> {
+    if area.width < 5 {
+        return None;
+    }
+    let y = area.y;
+    let x0 = area.x + area.width - 4; // 3-cell pill, leaving one trailing margin column
+    let center = x0 + 1;
+    let hovered = hover.1 == y && (x0..x0 + 3).contains(&hover.0);
+    let (bg, fg) = if hovered {
+        (dark().accent, Color::Black)
+    } else {
+        (dark().border, dark().accent)
+    };
+    let gs = glyph.to_string();
+    let buf = frame.buffer_mut();
+    for cx in x0..x0 + 3 {
+        if let Some(c) = buf.cell_mut((cx, y)) {
+            let mut s = Style::default().bg(bg);
+            if cx == center {
+                c.set_symbol(&gs);
+                s = s.fg(fg).bold();
+            } else {
+                c.set_symbol(" ");
+            }
+            c.set_style(s);
+        }
+    }
+    Some((center, y))
 }
 
 /// A unicode-safe icon + color for a tree row, by kind/extension.
@@ -138,79 +180,183 @@ fn file_icon(name: &str, is_dir: bool, expanded: bool) -> (&'static str, Color) 
     }
 }
 
+/// Lay out the body: sidebar | editor | terminal as flat columns separated by vertical rules, each
+/// pane respecting its mode (full / collapsed to a rail / hidden). Records per-frame geometry.
+fn layout_body(frame: &mut Frame, app: &mut App, body: Rect) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Hidden,
+        Rail,
+        Full,
+    }
+    let mode = |visible: bool, collapsed: bool| {
+        if !visible {
+            Mode::Hidden
+        } else if collapsed {
+            Mode::Rail
+        } else {
+            Mode::Full
+        }
+    };
+    let sb = mode(app.sidebar_visible, app.sidebar_collapsed);
+    let ed = mode(app.editor_visible, app.editor_collapsed);
+    // The terminal shows as a rail when collapsed (even with no shell yet); only a full, non-empty
+    // panel renders content. An expanded-but-empty panel is treated as hidden (shouldn't occur —
+    // expanding spawns a shell).
+    let pn = if !app.panel.visible || (!app.panel_collapsed && app.panel.is_empty()) {
+        Mode::Hidden
+    } else if app.panel_collapsed {
+        Mode::Rail
+    } else {
+        Mode::Full
+    };
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Seg {
+        Sidebar,
+        SidebarRail,
+        Editor,
+        EditorRail,
+        Panel,
+        PanelRail,
+        DivSidebar,
+        DivTerm,
+        Div,
+        Hint,
+    }
+
+    let sb_w = match sb {
+        Mode::Full => app.sidebar_width,
+        Mode::Rail => RAIL_W,
+        Mode::Hidden => 0,
+    };
+    // Terminal width when both editor and panel are full (term_ratio % of the editor+panel region).
+    let n_div = (sb != Mode::Hidden) as u16 + 1;
+    let region = body.width.saturating_sub(sb_w + n_div);
+    let term_w = if region >= 14 {
+        (((region as u32 * app.term_ratio as u32) / 100) as u16).clamp(6, region - 6)
+    } else {
+        region / 2
+    };
+
+    // Build the panes left→right WITHOUT dividers. Order keeps the explorer leftmost and the
+    // terminal rightmost; a collapsed editor tucks its rail next to the explorer, and an empty
+    // middle gets the hint. The flex (Min(0)) pane absorbs the slack.
+    let mut panes: Vec<(Constraint, Seg)> = Vec::new();
+    match sb {
+        Mode::Full => panes.push((Constraint::Length(sb_w), Seg::Sidebar)),
+        Mode::Rail => panes.push((Constraint::Length(RAIL_W), Seg::SidebarRail)),
+        Mode::Hidden => {}
+    }
+    if ed == Mode::Rail {
+        panes.push((Constraint::Length(RAIL_W), Seg::EditorRail));
+    }
+    if ed == Mode::Full {
+        panes.push((Constraint::Min(0), Seg::Editor));
+        match pn {
+            Mode::Full => panes.push((Constraint::Length(term_w), Seg::Panel)),
+            Mode::Rail => panes.push((Constraint::Length(RAIL_W), Seg::PanelRail)),
+            Mode::Hidden => {}
+        }
+    } else {
+        // Editor not full: the terminal (if full) flexes to fill; otherwise a hint fills the middle.
+        match pn {
+            Mode::Full => panes.push((Constraint::Min(0), Seg::Panel)),
+            Mode::Rail => {
+                panes.push((Constraint::Min(0), Seg::Hint));
+                panes.push((Constraint::Length(RAIL_W), Seg::PanelRail));
+            }
+            Mode::Hidden => panes.push((Constraint::Min(0), Seg::Hint)),
+        }
+    }
+
+    // Interleave a 1-col divider between adjacent panes. The divider right of a full sidebar resizes
+    // it; the one between a full editor and full terminal resizes the split; others are decorative.
+    let mut segs: Vec<(Constraint, Seg)> = Vec::new();
+    for (i, (c, s)) in panes.iter().enumerate() {
+        if i > 0 {
+            let prev = panes[i - 1].1;
+            let kind = if prev == Seg::Sidebar {
+                Seg::DivSidebar
+            } else if prev == Seg::Editor && *s == Seg::Panel {
+                Seg::DivTerm
+            } else {
+                Seg::Div
+            };
+            segs.push((Constraint::Length(1), kind));
+        }
+        segs.push((*c, *s));
+    }
+
+    let constraints: Vec<Constraint> = segs.iter().map(|(c, _)| *c).collect();
+    let rects = Layout::horizontal(constraints).split(body);
+    for (rect, (_, seg)) in rects.iter().zip(segs.iter()) {
+        let r = *rect;
+        match seg {
+            Seg::Sidebar => draw_sidebar(frame, app, r),
+            Seg::SidebarRail => {
+                draw_rail(frame, r, "EXPLORER", '›', app.hover);
+                app.sidebar_rail = Some(r);
+            }
+            Seg::Editor => {
+                app.editor_area = r;
+                draw_editor(frame, app, r);
+            }
+            Seg::EditorRail => {
+                draw_rail(frame, r, "EDITOR", '›', app.hover);
+                app.editor_rail = Some(r);
+            }
+            Seg::Panel => {
+                app.terminal_area = r;
+                draw_panel(frame, app, r);
+            }
+            Seg::PanelRail => {
+                draw_rail(frame, r, "TERMINAL", '‹', app.hover);
+                app.panel_rail = Some(r);
+            }
+            Seg::DivSidebar => {
+                vrule(frame, r.x, r.y, r.height);
+                app.sidebar_divider_col = Some(r.x);
+            }
+            Seg::DivTerm => {
+                vrule(frame, r.x, r.y, r.height);
+                app.term_divider_col = Some(r.x);
+            }
+            Seg::Div => vrule(frame, r.x, r.y, r.height),
+            Seg::Hint => draw_all_hidden(frame, app, r),
+        }
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = frame.area().width;
     app.editor_hbar = None;
-    let [main, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [appbar, sep1, body, sep2, status] = Layout::vertical([
+        Constraint::Length(1), // global app bar
+        Constraint::Length(1), // rule
+        Constraint::Min(0),    // panes
+        Constraint::Length(1), // rule
+        Constraint::Length(1), // status bar
+    ])
+    .areas(frame.area());
 
+    // Reset per-frame chrome geometry.
     app.sidebar_rail = None;
     app.sidebar_body = None;
     app.sidebar_collapse_hit = None;
-    let content = if app.sidebar_visible {
-        if app.sidebar_collapsed {
-            let [rail, rest] =
-                Layout::horizontal([Constraint::Length(RAIL_W), Constraint::Min(0)]).areas(main);
-            draw_rail(frame, rail, "EXPLORER", '›');
-            app.sidebar_rail = Some(rail);
-            rest
-        } else {
-            let [side, rest] =
-                Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
-                    .areas(main);
-            draw_sidebar(frame, app, side);
-            rest
-        }
-    } else {
-        main
-    };
-
-    app.panel_rail = None;
     app.panel_collapse_hit = None;
-    let show_editor = app.editor_visible;
-    let show_panel = app.panel.visible && !app.panel.is_empty();
-    // A collapsed panel renders as a thin rail on the right rather than the full pane.
-    let panel_railed = show_panel && app.panel_collapsed;
+    app.editor_collapse_hit = None;
+    app.sidebar_divider_col = None;
+    app.panel_rail = None;
+    app.editor_rail = None;
+    app.term_divider_col = None;
     app.editor_area = Rect::default();
     app.terminal_area = Rect::default();
-    match (show_editor, show_panel) {
-        (true, true) if panel_railed => {
-            let [edit, rail] =
-                Layout::horizontal([Constraint::Min(0), Constraint::Length(RAIL_W)]).areas(content);
-            app.editor_area = edit;
-            draw_editor(frame, app, edit);
-            draw_rail(frame, rail, "TERMINAL", '‹');
-            app.panel_rail = Some(rail);
-        }
-        (true, true) => {
-            let term_pct = app.term_ratio;
-            let [edit, term] = Layout::horizontal([
-                Constraint::Percentage(100 - term_pct),
-                Constraint::Percentage(term_pct),
-            ])
-            .areas(content);
-            app.editor_area = edit;
-            app.terminal_area = term;
-            draw_editor(frame, app, edit);
-            draw_panel(frame, app, term);
-        }
-        (true, false) => {
-            app.editor_area = content;
-            draw_editor(frame, app, content);
-        }
-        (false, true) if panel_railed => {
-            let [rest, rail] =
-                Layout::horizontal([Constraint::Min(0), Constraint::Length(RAIL_W)]).areas(content);
-            draw_all_hidden(frame, app, rest);
-            draw_rail(frame, rail, "TERMINAL", '‹');
-            app.panel_rail = Some(rail);
-        }
-        (false, true) => {
-            app.terminal_area = content;
-            draw_panel(frame, app, content);
-        }
-        (false, false) => draw_all_hidden(frame, app, content),
-    }
+
+    draw_app_bar(frame, app, appbar);
+    hrule(frame, sep1);
+    layout_body(frame, app, body);
+    hrule(frame, sep2);
     draw_status(frame, app, status);
 
     if let Some(prompt) = app.prompt.as_ref() {
@@ -467,18 +613,11 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         SidebarMode::SourceControl if app.git_branch.is_empty() => "SOURCE CONTROL".to_string(),
         SidebarMode::SourceControl => format!("SOURCE CONTROL — {}", app.git_branch),
     };
-    let pf = pane_frame(frame, area, &title, focused);
-    // Control chips on the right of the header bar: ─ collapse to rail, ✕ hide entirely.
-    if pf.header.width >= 7 {
-        let cy = pf.header.y;
-        let right = pf.header.x + pf.header.width;
-        let buf = frame.buffer_mut();
-        app.sidebar_hide_hit = Some(header_chip(buf, right - 2, cy, "✕", focused));
-        app.sidebar_collapse_hit = Some(header_chip(buf, right - 5, cy, "─", focused));
-    }
+    let (content, hit) = pane_label(frame, area, &title, focused, '‹', app.hover);
+    app.sidebar_collapse_hit = hit;
     match app.sidebar_mode {
-        SidebarMode::Explorer => draw_explorer(frame, app, pf.content),
-        SidebarMode::SourceControl => draw_scm(frame, app, pf.content),
+        SidebarMode::Explorer => draw_explorer(frame, app, content),
+        SidebarMode::SourceControl => draw_scm(frame, app, content),
     }
 }
 
@@ -688,16 +827,13 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Editor;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color(focused)));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = area;
 
     if app.editor.tabs.is_empty() {
         app.editor.viewport = 0;
         let km = &app.config.keymap;
+        // The welcome screen has no tab bar, so place the collapse button at the top-right itself.
+        app.editor_collapse_hit = collapse_button(frame, inner, '‹', app.hover);
 
         // Block-letter banner shown when no file is open (à la opencode's logo).
         const BANNER: [&str; 5] = [
@@ -840,6 +976,8 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     app.editor.close_hitboxes = close_hb;
     app.editor.tabbar_row = tabbar.y;
     frame.render_widget(Paragraph::new(Line::from(spans)), tabbar);
+    // Collapse button at the right of the tab bar (collapse the editor to a rail).
+    app.editor_collapse_hit = collapse_button(frame, tabbar, '‹', app.hover);
 
     // Image buffers render via the terminal graphics protocol (kitty/sixel/iTerm2/half-blocks).
     if app.editor.active_buffer().map(|b| b.image.is_some()).unwrap_or(false) {
@@ -1260,7 +1398,8 @@ fn draw_find_bar(frame: &mut Frame, s: &Search, area: Rect) {
     frame.set_cursor_position((cx, inner.y));
 }
 
-/// Placeholder shown when both the editor and the terminal panel are hidden.
+/// Placeholder shown in the empty middle when the editor/terminal aren't open there. Distinguishes
+/// *minimized* panes (collapsed to a rail — click to expand) from *hidden* panes (toggle to show).
 fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
     let km = &app.config.keymap;
     let hint = |chord: String, label: &str| {
@@ -1269,6 +1408,42 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("  {label}"), Style::default().fg(dark().dim)),
         ])
     };
+    let sidebar_hidden = !app.sidebar_visible;
+    let editor_hidden = !app.editor_visible;
+    let panel_hidden = !app.panel.visible || app.panel.is_empty();
+    let any_minimized = (app.sidebar_visible && app.sidebar_collapsed)
+        || (app.editor_visible && app.editor_collapsed)
+        || (app.panel.visible && !app.panel.is_empty() && app.panel_collapsed);
+    let any_hidden = sidebar_hidden || editor_hidden || panel_hidden;
+
+    let heading = match (any_minimized, any_hidden) {
+        (true, false) => "Panes minimized",
+        (true, true) => "Panes minimized or hidden",
+        _ => "All panes hidden",
+    };
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(heading, Style::default().fg(dark().fg).bold())),
+        Line::from(""),
+    ];
+    if any_minimized {
+        lines.push(Line::from(Span::styled(
+            "click a rail to expand",
+            Style::default().fg(dark().dim),
+        )));
+        lines.push(Line::from(""));
+    }
+    // Keyboard hints only for the panes that are fully hidden (a rail is restored by clicking it).
+    if editor_hidden {
+        lines.push(hint(km.toggle_editor.to_string(), "show editor"));
+    }
+    if panel_hidden {
+        lines.push(hint(km.toggle_panel.to_string(), "show terminal panel"));
+    }
+    if sidebar_hidden {
+        lines.push(hint(km.toggle_sidebar.to_string(), "show sidebar"));
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1276,18 +1451,7 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "All panes hidden",
-                Style::default().fg(dark().fg).bold(),
-            )),
-            Line::from(""),
-            hint(km.toggle_editor.to_string(), "show editor"),
-            hint(km.toggle_panel.to_string(), "show terminal panel"),
-            hint(km.toggle_sidebar.to_string(), "show sidebar"),
-        ])
-        .alignment(Alignment::Center),
+        Paragraph::new(lines).alignment(Alignment::Center),
         inner,
     );
 }
@@ -1297,19 +1461,12 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let bc = border_color(focused);
     let working = app.term_working();
     let title = if working {
-        format!("{} TERMINAL", app.spinner())
+        format!("TERMINAL  {}", app.spinner())
     } else {
         "TERMINAL".to_string()
     };
-    let pf = pane_frame(frame, area, &title, focused);
-    // Minimize chip on the right of the header (collapse to a rail).
-    if pf.header.width >= 4 {
-        let cy = pf.header.y;
-        let right = pf.header.x + pf.header.width;
-        let buf = frame.buffer_mut();
-        app.panel_collapse_hit = Some(header_chip(buf, right - 2, cy, "─", focused));
-    }
-    let inner = pf.content;
+    let (inner, hit) = pane_label(frame, area, &title, focused, '›', app.hover);
+    app.panel_collapse_hit = hit;
 
     // Split: terminal content on the left, a draggable vertical tab strip on the right.
     let strip_w = app
@@ -1322,6 +1479,9 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(bc));
     let strip = tabblock.inner(tabcol);
     frame.render_widget(tabblock, tabcol);
+    // Pad the tab list down one row so the first tab doesn't collide with the collapse button
+    // sitting directly above it in the header.
+    let strip = Rect::new(strip.x, strip.y + 1, strip.width, strip.height.saturating_sub(1));
 
     // Reserve a column for the scrollbar (house style, toggled by alt+s) when there's history.
     // No scrollbar for alternate-screen apps (vim/btop/ranger): they have no meaningful scrollback,

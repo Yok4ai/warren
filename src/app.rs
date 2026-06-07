@@ -119,13 +119,21 @@ pub struct App {
     pub sidebar_rail: Option<Rect>,
     /// Per-frame: the explorer tree's content rect (where row 0 is drawn), for click→row mapping.
     pub sidebar_body: Option<Rect>,
-    /// Per-frame: header-bar chip cells (click to collapse to a rail / hide entirely).
+    /// Per-frame: each pane's collapse control cell (the chevron in its header — click to collapse).
     pub sidebar_collapse_hit: Option<(u16, u16)>,
-    pub sidebar_hide_hit: Option<(u16, u16)>,
+    pub panel_collapse_hit: Option<(u16, u16)>,
+    pub editor_collapse_hit: Option<(u16, u16)>,
     /// Terminal panel collapsed to a thin clickable rail (distinct from hidden).
     pub panel_collapsed: bool,
     pub panel_rail: Option<Rect>,
-    pub panel_collapse_hit: Option<(u16, u16)>,
+    /// Editor collapsed to a thin clickable rail (distinct from hidden via alt+e).
+    pub editor_collapsed: bool,
+    pub editor_rail: Option<Rect>,
+    /// Per-frame column of the sidebar↔editor and editor↔terminal dividers (for drag detection).
+    pub sidebar_divider_col: Option<u16>,
+    pub term_divider_col: Option<u16>,
+    /// Last mouse cell, for hover highlighting of clickable chrome (e.g. collapse buttons).
+    pub hover: (u16, u16),
     /// True while dragging the sidebar/editor divider.
     resizing: bool,
     /// True while dragging the editor scrollbar thumb.
@@ -266,10 +274,15 @@ impl App {
             sidebar_rail: None,
             sidebar_body: None,
             sidebar_collapse_hit: None,
-            sidebar_hide_hit: None,
-            panel_collapsed: false,
-            panel_rail: None,
             panel_collapse_hit: None,
+            editor_collapse_hit: None,
+            panel_collapsed: true,
+            panel_rail: None,
+            editor_collapsed: false,
+            editor_rail: None,
+            sidebar_divider_col: None,
+            term_divider_col: None,
+            hover: (0, 0),
             resizing: false,
             dragging_scrollbar: false,
             scrollbar_grab: 0,
@@ -290,7 +303,12 @@ impl App {
             drag_source: None,
             dragging: false,
             drag_pos: (0, 0),
-            panel: Panel::default(),
+            // Start with the terminal present as a minimized rail (empty until expanded), so the
+            // user can see it exists; clicking the rail / ctrl+` spawns the shell on demand.
+            panel: Panel {
+                visible: true,
+                ..Panel::default()
+            },
             term_ratio: 50,
             panel_strip_w: 10,
             resizing_term: false,
@@ -455,9 +473,7 @@ impl App {
             }
             AppEvent::PtyExited => {
                 if self.panel.prune_exited() {
-                    if self.panel.terms.is_empty() && self.focus == Focus::Terminal {
-                        self.focus = Focus::Editor;
-                    }
+                    self.keep_terminal_rail_if_empty();
                     self.needs_redraw = true;
                 }
             }
@@ -509,9 +525,31 @@ impl App {
             || self.dragging
     }
 
-    /// Handle a left-click on pane chrome (collapse/expand rails and header chips). Returns true if
-    /// the click was consumed, so content handling is skipped.
+    /// Handle a left-click on pane chrome: a pane's header collapse chevron, or a collapsed pane's
+    /// rail (to expand). Returns true if the click was consumed, so content handling is skipped.
     fn handle_chrome_click(&mut self, col: u16, row: u16) -> bool {
+        // Collapse a pane via the chevron in its header (a ~2-cell target around the chevron).
+        if hit_chevron(self.sidebar_collapse_hit, col, row) {
+            self.sidebar_collapsed = true;
+            if self.focus == Focus::Sidebar {
+                self.cycle_focus();
+            }
+            return true;
+        }
+        if hit_chevron(self.editor_collapse_hit, col, row) {
+            self.editor_collapsed = true;
+            if self.focus == Focus::Editor {
+                self.cycle_focus();
+            }
+            return true;
+        }
+        if hit_chevron(self.panel_collapse_hit, col, row) {
+            self.panel_collapsed = true;
+            if self.focus == Focus::Terminal {
+                self.cycle_focus();
+            }
+            return true;
+        }
         // Expand a collapsed pane by clicking anywhere on its rail.
         if self.sidebar_rail.is_some_and(|r| rect_contains(r, col, row)) {
             self.sidebar_collapsed = false;
@@ -519,47 +557,31 @@ impl App {
             return true;
         }
         if self.panel_rail.is_some_and(|r| rect_contains(r, col, row)) {
-            self.panel_collapsed = false;
-            self.focus = Focus::Terminal;
+            self.expand_panel();
             return true;
         }
-        // Header chips: ─ collapse to a rail, ✕ hide the sidebar entirely.
-        if self.sidebar_collapse_hit == Some((col, row)) {
-            self.sidebar_collapsed = true;
-            if self.focus == Focus::Sidebar {
-                self.cycle_focus();
-            }
-            return true;
-        }
-        if self.sidebar_hide_hit == Some((col, row)) {
-            self.sidebar_visible = false;
-            if self.focus == Focus::Sidebar {
-                self.cycle_focus();
-            }
-            return true;
-        }
-        if self.panel_collapse_hit == Some((col, row)) {
-            self.panel_collapsed = true;
-            if self.focus == Focus::Terminal {
-                self.cycle_focus();
-            }
+        if self.editor_rail.is_some_and(|r| rect_contains(r, col, row)) {
+            self.editor_collapsed = false;
+            self.focus = Focus::Editor;
             return true;
         }
         false
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        // Track the cursor for hover effects; a plain move repaints so highlights update live.
+        if self.hover != (m.column, m.row) {
+            self.hover = (m.column, m.row);
+            if matches!(m.kind, MouseEventKind::Moved) {
+                self.needs_redraw = true;
+            }
+        }
         let sidebar_open = self.sidebar_visible && !self.sidebar_collapsed;
         let in_sidebar = sidebar_open && m.column < self.sidebar_width;
-        let on_sidebar_divider = sidebar_open
-            && (self.sidebar_width.saturating_sub(1)..=self.sidebar_width).contains(&m.column);
+        let on_sidebar_divider = self.sidebar_divider_col == Some(m.column);
         let term_open = self.panel.visible && !self.panel.is_empty();
         let in_terminal = term_open && rect_contains(self.terminal_area, m.column, m.row);
-        let on_term_divider = term_open
-            && self.editor_visible
-            && (self.terminal_area.x.saturating_sub(1)..=self.terminal_area.x).contains(&m.column)
-            && (self.terminal_area.y..self.terminal_area.y + self.terminal_area.height)
-                .contains(&m.row);
+        let on_term_divider = self.term_divider_col == Some(m.column);
         let on_strip_divider = term_open
             && (self.panel_divider_col.saturating_sub(1)..=self.panel_divider_col)
                 .contains(&m.column)
@@ -651,7 +673,7 @@ impl App {
                         self.term_sel = Some((pos, pos));
                         self.term_selecting = false;
                     }
-                } else if self.editor_visible {
+                } else if self.editor_visible && !self.editor_collapsed {
                     self.focus = Focus::Editor;
                     if self.on_hbar(&m) {
                         // Grab the horizontal scrollbar without jumping.
@@ -760,9 +782,7 @@ impl App {
                     let idx = (m.row - self.panel.tablist_area.y) as usize;
                     if idx < self.panel.terms.len() {
                         self.panel.close(idx);
-                        if self.panel.is_empty() {
-                            self.focus = Focus::Editor;
-                        }
+                        self.keep_terminal_rail_if_empty();
                     }
                 }
                 self.needs_redraw = true;
@@ -894,9 +914,7 @@ impl App {
             std::cmp::Ordering::Less => {
                 if col >= strip.x + strip.width.saturating_sub(2) {
                     self.panel.close(idx);
-                    if self.panel.is_empty() {
-                        self.focus = Focus::Editor;
-                    }
+                    self.keep_terminal_rail_if_empty();
                 } else {
                     self.panel.active = idx;
                 }
@@ -1187,6 +1205,9 @@ impl App {
             self.editor_visible = !self.editor_visible;
             if !self.editor_visible && self.focus == Focus::Editor {
                 self.cycle_focus();
+            } else if self.editor_visible {
+                self.editor_collapsed = false; // alt+e always shows the full editor
+                self.focus = Focus::Editor;
             }
         } else if km.toggle_scm.matches(c, m) {
             self.sidebar_mode = if self.sidebar_mode == SidebarMode::SourceControl {
@@ -1254,7 +1275,7 @@ impl App {
         if self.sidebar_visible && !self.sidebar_collapsed {
             order.push(Focus::Sidebar);
         }
-        if self.editor_visible {
+        if self.editor_visible && !self.editor_collapsed {
             order.push(Focus::Editor);
         }
         if self.panel.visible && !self.panel.is_empty() && !self.panel_collapsed {
@@ -1296,25 +1317,41 @@ impl App {
         }
     }
 
-    /// Toggle the terminal panel: focus it if hidden/unfocused (spawning a terminal if empty),
-    /// or hide it if it's already focused.
-    fn toggle_panel(&mut self) {
-        if self.panel.visible {
-            if self.panel_collapsed {
-                self.panel_collapsed = false; // expand a railed panel
-                self.focus = Focus::Terminal;
-            } else if self.focus == Focus::Terminal {
-                self.panel.visible = false;
+    /// After closing a terminal: if none remain, keep the panel as a discoverable rail instead of
+    /// removing it, and move focus off the (now empty) terminal.
+    fn keep_terminal_rail_if_empty(&mut self) {
+        if self.panel.is_empty() {
+            self.panel.visible = true;
+            self.panel_collapsed = true;
+            if self.focus == Focus::Terminal {
                 self.focus = Focus::Editor;
+            }
+        }
+    }
+
+    /// Expand the terminal panel from its rail, spawning a shell if it has none yet.
+    fn expand_panel(&mut self) {
+        self.panel.visible = true;
+        self.panel_collapsed = false;
+        if self.panel.is_empty() {
+            self.spawn_terminal(); // sets focus to the new terminal
+        } else {
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    /// Toggle the terminal panel: expand it from the rail (spawning a shell if empty), or collapse
+    /// it back to a rail when it's already focused and open.
+    fn toggle_panel(&mut self) {
+        if self.panel.visible && !self.panel_collapsed && !self.panel.is_empty() {
+            if self.focus == Focus::Terminal {
+                self.panel_collapsed = true; // collapse to a rail instead of hiding outright
+                self.cycle_focus();
             } else {
                 self.focus = Focus::Terminal;
             }
-        } else if self.panel.is_empty() {
-            self.spawn_terminal();
         } else {
-            self.panel.visible = true;
-            self.panel_collapsed = false;
-            self.focus = Focus::Terminal;
+            self.expand_panel();
         }
     }
 
@@ -1336,6 +1373,9 @@ impl App {
             }
         } else if km.toggle_editor.matches(c, m) {
             self.editor_visible = !self.editor_visible;
+            if self.editor_visible {
+                self.editor_collapsed = false;
+            }
         } else if km.toggle_panel.matches(c, m) {
             self.toggle_panel();
         } else if km.toggle_scrollbar.matches(c, m) {
@@ -1350,9 +1390,7 @@ impl App {
             self.panel.prev();
         } else if km.close_tab.matches(c, m) {
             self.panel.close(self.panel.active);
-            if self.panel.is_empty() {
-                self.focus = Focus::Editor;
-            }
+            self.keep_terminal_rail_if_empty();
         } else if matches!(c, KeyCode::PageUp | KeyCode::PageDown)
             && (m.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
                 || !self.panel.active().map(|t| t.in_alt_screen()).unwrap_or(false))
@@ -2479,6 +2517,12 @@ fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
 /// Some terminals report Ctrl+Shift+` as Ctrl+~; accept it as the new-terminal chord too.
 fn is_ctrl_tilde(code: KeyCode, mods: KeyModifiers) -> bool {
     matches!(code, KeyCode::Char('~')) && mods.contains(KeyModifiers::CONTROL)
+}
+
+/// A click counts as hitting a header collapse button if it lands on the button's center cell or
+/// either neighbor (the button is a 3-cell pill, so accept the full width).
+fn hit_chevron(hit: Option<(u16, u16)>, col: u16, row: u16) -> bool {
+    hit.is_some_and(|(hx, hy)| hy == row && (hx.saturating_sub(1)..=hx + 1).contains(&col))
 }
 
 /// Copy text to the system clipboard via the OSC 52 terminal escape. Works in kitty (and most
