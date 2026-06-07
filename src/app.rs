@@ -113,6 +113,19 @@ pub struct App {
     sidebar_sb_grab: i32,
     /// Sidebar width in columns (draggable).
     pub sidebar_width: u16,
+    /// Collapsed to a thin clickable rail (distinct from hidden); restored by clicking the rail.
+    pub sidebar_collapsed: bool,
+    /// Per-frame: the collapsed sidebar rail's clickable area (click to expand).
+    pub sidebar_rail: Option<Rect>,
+    /// Per-frame: the explorer tree's content rect (where row 0 is drawn), for click→row mapping.
+    pub sidebar_body: Option<Rect>,
+    /// Per-frame: header-bar chip cells (click to collapse to a rail / hide entirely).
+    pub sidebar_collapse_hit: Option<(u16, u16)>,
+    pub sidebar_hide_hit: Option<(u16, u16)>,
+    /// Terminal panel collapsed to a thin clickable rail (distinct from hidden).
+    pub panel_collapsed: bool,
+    pub panel_rail: Option<Rect>,
+    pub panel_collapse_hit: Option<(u16, u16)>,
     /// True while dragging the sidebar/editor divider.
     resizing: bool,
     /// True while dragging the editor scrollbar thumb.
@@ -142,6 +155,10 @@ pub struct App {
     /// Current cursor-blink phase (on/off), and when blinking started.
     pub blink_on: bool,
     blink_start: Instant,
+    /// Monotonic start, for time-based animations (spinner frames).
+    anim_start: Instant,
+    /// When a terminal child last produced output, to drive the "working" pulse/spinner.
+    term_activity: Option<Instant>,
     /// Drag-and-drop from the explorer: the path being dragged, whether a real drag is underway,
     /// and the current mouse position (for the floating label).
     pub drag_source: Option<PathBuf>,
@@ -245,6 +262,14 @@ impl App {
             dragging_sidebar_sb: false,
             sidebar_sb_grab: 0,
             sidebar_width: 32,
+            sidebar_collapsed: false,
+            sidebar_rail: None,
+            sidebar_body: None,
+            sidebar_collapse_hit: None,
+            sidebar_hide_hit: None,
+            panel_collapsed: false,
+            panel_rail: None,
+            panel_collapse_hit: None,
             resizing: false,
             dragging_scrollbar: false,
             scrollbar_grab: 0,
@@ -260,6 +285,8 @@ impl App {
             show_help: false,
             blink_on: true,
             blink_start: Instant::now(),
+            anim_start: Instant::now(),
+            term_activity: None,
             drag_source: None,
             dragging: false,
             drag_pos: (0, 0),
@@ -328,6 +355,12 @@ impl App {
                     if self.should_quit {
                         break;
                     }
+                    // Divider/scrollbar drags must track the cursor 1:1; deferring to the next tick
+                    // (up to 16ms away) makes them feel laggy. Repaint now while a drag is active.
+                    if self.needs_redraw && self.is_dragging() {
+                        self.draw(terminal)?;
+                        self.needs_redraw = false;
+                    }
                 }
             }
         }
@@ -358,6 +391,10 @@ impl App {
         let phase = (self.blink_start.elapsed().as_millis() / 530) % 2 == 0;
         if phase != self.blink_on {
             self.blink_on = phase;
+            self.needs_redraw = true;
+        }
+        // Keep the spinner/working-pulse animating while a terminal is producing output.
+        if self.term_working() {
             self.needs_redraw = true;
         }
     }
@@ -412,7 +449,10 @@ impl App {
                 self.status = msg;
                 self.needs_redraw = true;
             }
-            AppEvent::PtyChanged => self.needs_redraw = true,
+            AppEvent::PtyChanged => {
+                self.term_activity = Some(Instant::now());
+                self.needs_redraw = true;
+            }
             AppEvent::PtyExited => {
                 if self.panel.prune_exited() {
                     if self.panel.terms.is_empty() && self.focus == Focus::Terminal {
@@ -456,9 +496,62 @@ impl App {
         }
     }
 
+    /// True while a mouse drag that needs 1:1 cursor tracking is in progress (divider/scrollbar
+    /// resize or a file drag). Lets the run loop repaint immediately instead of waiting for a tick.
+    fn is_dragging(&self) -> bool {
+        self.resizing
+            || self.resizing_term
+            || self.resizing_strip
+            || self.dragging_scrollbar
+            || self.dragging_term_sb
+            || self.dragging_sidebar_sb
+            || self.dragging_hbar
+            || self.dragging
+    }
+
+    /// Handle a left-click on pane chrome (collapse/expand rails and header chips). Returns true if
+    /// the click was consumed, so content handling is skipped.
+    fn handle_chrome_click(&mut self, col: u16, row: u16) -> bool {
+        // Expand a collapsed pane by clicking anywhere on its rail.
+        if self.sidebar_rail.is_some_and(|r| rect_contains(r, col, row)) {
+            self.sidebar_collapsed = false;
+            self.focus = Focus::Sidebar;
+            return true;
+        }
+        if self.panel_rail.is_some_and(|r| rect_contains(r, col, row)) {
+            self.panel_collapsed = false;
+            self.focus = Focus::Terminal;
+            return true;
+        }
+        // Header chips: ─ collapse to a rail, ✕ hide the sidebar entirely.
+        if self.sidebar_collapse_hit == Some((col, row)) {
+            self.sidebar_collapsed = true;
+            if self.focus == Focus::Sidebar {
+                self.cycle_focus();
+            }
+            return true;
+        }
+        if self.sidebar_hide_hit == Some((col, row)) {
+            self.sidebar_visible = false;
+            if self.focus == Focus::Sidebar {
+                self.cycle_focus();
+            }
+            return true;
+        }
+        if self.panel_collapse_hit == Some((col, row)) {
+            self.panel_collapsed = true;
+            if self.focus == Focus::Terminal {
+                self.cycle_focus();
+            }
+            return true;
+        }
+        false
+    }
+
     fn on_mouse(&mut self, m: MouseEvent) {
-        let in_sidebar = self.sidebar_visible && m.column < self.sidebar_width;
-        let on_sidebar_divider = self.sidebar_visible
+        let sidebar_open = self.sidebar_visible && !self.sidebar_collapsed;
+        let in_sidebar = sidebar_open && m.column < self.sidebar_width;
+        let on_sidebar_divider = sidebar_open
             && (self.sidebar_width.saturating_sub(1)..=self.sidebar_width).contains(&m.column);
         let term_open = self.panel.visible && !self.panel.is_empty();
         let in_terminal = term_open && rect_contains(self.terminal_area, m.column, m.row);
@@ -499,6 +592,14 @@ impl App {
                 self.needs_redraw = true;
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // A fresh press starts a new gesture: clear any drag left stuck by a missed
+                // off-window release before deciding what this press grabs.
+                self.clear_drag_state();
+                // Pane chrome (collapse/expand rails + header chips) takes precedence over content.
+                if self.handle_chrome_click(m.column, m.row) {
+                    self.needs_redraw = true;
+                    return;
+                }
                 // Any new press clears a prior terminal selection; the terminal branch re-arms it.
                 self.term_sel = None;
                 self.term_selecting = false;
@@ -524,14 +625,18 @@ impl App {
                         self.sidebar_sb_grab = self.sidebar_sb_grab_offset(m.row);
                     } else if self.sidebar_mode == SidebarMode::SourceControl {
                         self.scm_click(m.row);
-                    } else if m.row >= 1 {
-                        let idx = self.tree.scroll + (m.row as usize - 1);
-                        if idx < self.tree.rows.len() {
-                            self.tree.selected = idx;
-                            // Record a potential drag; a plain click (no move) activates on release.
-                            self.drag_source = Some(self.tree.rows[idx].path.clone());
-                            self.dragging = false;
-                            self.drag_pos = (m.column, m.row);
+                    } else if let Some(body) = self.sidebar_body {
+                        // Map the click to a tree row relative to the content origin (below the
+                        // rounded border + accent header bar + separator).
+                        if m.row >= body.y {
+                            let idx = self.tree.scroll + (m.row - body.y) as usize;
+                            if idx < self.tree.rows.len() {
+                                self.tree.selected = idx;
+                                // A potential drag; a plain click (no move) activates on release.
+                                self.drag_source = Some(self.tree.rows[idx].path.clone());
+                                self.dragging = false;
+                                self.drag_pos = (m.column, m.row);
+                            }
                         }
                     }
                 } else if in_terminal {
@@ -728,6 +833,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Clear every left-drag flag. Used on release and to recover a drag whose off-window release
+    /// was never delivered.
+    fn clear_drag_state(&mut self) {
+        self.resizing = false;
+        self.resizing_term = false;
+        self.resizing_strip = false;
+        self.dragging_scrollbar = false;
+        self.dragging_term_sb = false;
+        self.dragging_sidebar_sb = false;
+        self.dragging_hbar = false;
+        self.dragging = false;
+        self.drag_source = None;
+        self.term_selecting = false;
     }
 
     /// Map an absolute mouse position to a `(row, col)` cell within the terminal content area,
@@ -1060,6 +1180,7 @@ impl App {
             if !self.sidebar_visible && self.focus == Focus::Sidebar {
                 self.cycle_focus();
             } else if self.sidebar_visible {
+                self.sidebar_collapsed = false; // ctrl+b always shows the full sidebar
                 self.focus = Focus::Sidebar;
             }
         } else if km.toggle_editor.matches(c, m) {
@@ -1109,16 +1230,34 @@ impl App {
         true
     }
 
+    /// Braille spinner frames for the "working" animation.
+    const SPINNER: [&'static str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    /// The spinner frame for the current time (advances ~12 fps).
+    pub fn spinner(&self) -> &'static str {
+        let i = (self.anim_start.elapsed().as_millis() / 80) as usize % Self::SPINNER.len();
+        Self::SPINNER[i]
+    }
+
+    /// True while a terminal child produced output recently — drives the working pulse/spinner.
+    pub fn term_working(&self) -> bool {
+        self.panel.visible
+            && !self.panel.is_empty()
+            && self
+                .term_activity
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(600))
+    }
+
     /// Cycle focus across the visible panes: sidebar → editor → terminal (only those shown).
     fn cycle_focus(&mut self) {
         let mut order = Vec::new();
-        if self.sidebar_visible {
+        if self.sidebar_visible && !self.sidebar_collapsed {
             order.push(Focus::Sidebar);
         }
         if self.editor_visible {
             order.push(Focus::Editor);
         }
-        if self.panel.visible && !self.panel.is_empty() {
+        if self.panel.visible && !self.panel.is_empty() && !self.panel_collapsed {
             order.push(Focus::Terminal);
         }
         if order.is_empty() {
@@ -1150,6 +1289,7 @@ impl App {
         match TerminalPane::spawn(&shell, &name, &self.workspace, 24, 80, tx, &env) {
             Ok(pane) => {
                 self.panel.add(pane);
+                self.panel_collapsed = false;
                 self.focus = Focus::Terminal;
             }
             Err(e) => self.status = format!("terminal failed: {e}"),
@@ -1160,7 +1300,10 @@ impl App {
     /// or hide it if it's already focused.
     fn toggle_panel(&mut self) {
         if self.panel.visible {
-            if self.focus == Focus::Terminal {
+            if self.panel_collapsed {
+                self.panel_collapsed = false; // expand a railed panel
+                self.focus = Focus::Terminal;
+            } else if self.focus == Focus::Terminal {
                 self.panel.visible = false;
                 self.focus = Focus::Editor;
             } else {
@@ -1170,6 +1313,7 @@ impl App {
             self.spawn_terminal();
         } else {
             self.panel.visible = true;
+            self.panel_collapsed = false;
             self.focus = Focus::Terminal;
         }
     }
@@ -1187,6 +1331,9 @@ impl App {
             self.cycle_focus();
         } else if km.toggle_sidebar.matches(c, m) {
             self.sidebar_visible = !self.sidebar_visible;
+            if self.sidebar_visible {
+                self.sidebar_collapsed = false;
+            }
         } else if km.toggle_editor.matches(c, m) {
             self.editor_visible = !self.editor_visible;
         } else if km.toggle_panel.matches(c, m) {

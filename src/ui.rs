@@ -1,10 +1,11 @@
 //! Top-level rendering: sidebar (explorer) + editor area (tabs + content) + statusline.
 //! Phase 5 replaces the fixed sidebar|editor split with the recursive layout tree.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::palette::Palette;
 use crate::prompt::Prompt;
@@ -22,27 +23,165 @@ fn dark() -> &'static theme::Theme {
     theme::current()
 }
 
+/// Width of a collapsed pane's rail, in columns.
+const RAIL_W: u16 = 3;
+
+/// Header row + content area returned by [`pane_frame`].
+struct PaneFrame {
+    header: Rect,
+    content: Rect,
+}
+
+/// Draw a rounded pane with a filled accent title bar and a separator rule. Returns the header row
+/// (for control chips) and the content area below it. The shared look for every pane.
+fn pane_frame(frame: &mut Frame, area: Rect, title: &str, focused: bool) -> PaneFrame {
+    let bc = border_color(focused);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(bc));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return PaneFrame {
+            header: inner,
+            content: inner,
+        };
+    }
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
+    // Filled accent title bar (brighter when focused).
+    let bar = Style::default()
+        .bg(if focused { dark().accent } else { dark().border })
+        .fg(if focused { Color::Black } else { dark().fg })
+        .bold();
+    frame.buffer_mut().set_style(header, bar);
+    frame.render_widget(Paragraph::new(Line::from(format!(" {title}"))).style(bar), header);
+    // Separator rule (├───┤) under the header.
+    let content = if inner.height >= 2 {
+        let sy = inner.y + 1;
+        let buf = frame.buffer_mut();
+        for x in inner.x..inner.x + inner.width {
+            if let Some(c) = buf.cell_mut((x, sy)) {
+                c.set_symbol("─");
+                c.set_style(Style::default().fg(bc));
+            }
+        }
+        if let Some(c) = buf.cell_mut((area.x, sy)) {
+            c.set_symbol("├");
+        }
+        if let Some(c) = buf.cell_mut((area.x + area.width - 1, sy)) {
+            c.set_symbol("┤");
+        }
+        Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2))
+    } else {
+        Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1))
+    };
+    PaneFrame { header, content }
+}
+
+/// Draw a control chip (glyph) into a header bar at cell `(x, y)`; returns its hitbox cell.
+fn header_chip(buf: &mut Buffer, x: u16, y: u16, glyph: &str, focused: bool) -> (u16, u16) {
+    if let Some(c) = buf.cell_mut((x, y)) {
+        c.set_symbol(glyph);
+        c.set_style(
+            Style::default()
+                .bg(if focused { dark().accent } else { dark().border })
+                .fg(if focused { Color::Black } else { dark().fg })
+                .bold(),
+        );
+    }
+    (x, y)
+}
+
+/// Draw a collapsed pane as a thin accent rail: an expand chevron at the top and the pane name
+/// running vertically below it. Clicking anywhere on the rail (handled in app.rs) restores the pane.
+fn draw_rail(frame: &mut Frame, area: Rect, label: &str, chevron: char) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(dark().border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    // Expand chevron in an accent cap at the top.
+    if let Some(cell) = buf.cell_mut((inner.x, inner.y)) {
+        cell.set_symbol(&chevron.to_string());
+        cell.set_style(Style::default().bg(dark().accent).fg(Color::Black).bold());
+    }
+    // Vertical label, one letter per row, starting a row below the chevron.
+    for (i, ch) in label.chars().enumerate() {
+        let y = inner.y + 2 + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((inner.x, y)) {
+            cell.set_symbol(&ch.to_string());
+            cell.set_style(Style::default().fg(dark().accent));
+        }
+    }
+}
+
+/// A unicode-safe icon + color for a tree row, by kind/extension.
+fn file_icon(name: &str, is_dir: bool, expanded: bool) -> (&'static str, Color) {
+    if is_dir {
+        return (if expanded { "▾" } else { "▸" }, dark().accent);
+    }
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" | "txt" | "rst" => ("◆", dark().fg),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" => ("▣", dark().accent),
+        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" => ("◇", dark().dim),
+        _ => ("●", dark().fg),
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = frame.area().width;
     app.editor_hbar = None;
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
+    app.sidebar_rail = None;
+    app.sidebar_body = None;
+    app.sidebar_collapse_hit = None;
     let content = if app.sidebar_visible {
-        let [side, rest] =
-            Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
-                .areas(main);
-        draw_sidebar(frame, app, side);
-        rest
+        if app.sidebar_collapsed {
+            let [rail, rest] =
+                Layout::horizontal([Constraint::Length(RAIL_W), Constraint::Min(0)]).areas(main);
+            draw_rail(frame, rail, "EXPLORER", '›');
+            app.sidebar_rail = Some(rail);
+            rest
+        } else {
+            let [side, rest] =
+                Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
+                    .areas(main);
+            draw_sidebar(frame, app, side);
+            rest
+        }
     } else {
         main
     };
 
+    app.panel_rail = None;
+    app.panel_collapse_hit = None;
     let show_editor = app.editor_visible;
     let show_panel = app.panel.visible && !app.panel.is_empty();
+    // A collapsed panel renders as a thin rail on the right rather than the full pane.
+    let panel_railed = show_panel && app.panel_collapsed;
     app.editor_area = Rect::default();
     app.terminal_area = Rect::default();
     match (show_editor, show_panel) {
+        (true, true) if panel_railed => {
+            let [edit, rail] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(RAIL_W)]).areas(content);
+            app.editor_area = edit;
+            draw_editor(frame, app, edit);
+            draw_rail(frame, rail, "TERMINAL", '‹');
+            app.panel_rail = Some(rail);
+        }
         (true, true) => {
             let term_pct = app.term_ratio;
             let [edit, term] = Layout::horizontal([
@@ -58,6 +197,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         (true, false) => {
             app.editor_area = content;
             draw_editor(frame, app, content);
+        }
+        (false, true) if panel_railed => {
+            let [rest, rail] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(RAIL_W)]).areas(content);
+            draw_all_hidden(frame, app, rest);
+            draw_rail(frame, rail, "TERMINAL", '‹');
+            app.panel_rail = Some(rail);
         }
         (false, true) => {
             app.terminal_area = content;
@@ -148,6 +294,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             " Keybindings — Esc to close ",
@@ -179,6 +326,7 @@ fn draw_confirm(frame: &mut Frame, name: &str, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             " Unsaved changes ",
@@ -223,6 +371,7 @@ fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(title, Style::default().fg(dark().accent).bold()));
     let inner = block.inner(rect);
@@ -286,6 +435,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             format!(" {} ", prompt.title),
@@ -311,26 +461,30 @@ fn border_color(focused: bool) -> Color {
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_sb = None;
+    let focused = app.focus == Focus::Sidebar;
+    let title = match app.sidebar_mode {
+        SidebarMode::Explorer => "EXPLORER".to_string(),
+        SidebarMode::SourceControl if app.git_branch.is_empty() => "SOURCE CONTROL".to_string(),
+        SidebarMode::SourceControl => format!("SOURCE CONTROL — {}", app.git_branch),
+    };
+    let pf = pane_frame(frame, area, &title, focused);
+    // Control chips on the right of the header bar: ─ collapse to rail, ✕ hide entirely.
+    if pf.header.width >= 7 {
+        let cy = pf.header.y;
+        let right = pf.header.x + pf.header.width;
+        let buf = frame.buffer_mut();
+        app.sidebar_hide_hit = Some(header_chip(buf, right - 2, cy, "✕", focused));
+        app.sidebar_collapse_hit = Some(header_chip(buf, right - 5, cy, "─", focused));
+    }
     match app.sidebar_mode {
-        SidebarMode::Explorer => draw_explorer(frame, app, area),
-        SidebarMode::SourceControl => draw_scm(frame, app, area),
+        SidebarMode::Explorer => draw_explorer(frame, app, pf.content),
+        SidebarMode::SourceControl => draw_scm(frame, app, pf.content),
     }
 }
 
 /// Source-control view: a CHANGES list and a GRAPH (commit) list, with one selection across both.
 fn draw_scm(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app.focus == Focus::Sidebar;
-    let title = if app.git_branch.is_empty() {
-        " Source Control ".to_string()
-    } else {
-        format!(" Source Control — {} ", app.git_branch)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color(focused)))
-        .title(Span::styled(title, Style::default().fg(dark().accent).bold()));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = area;
 
     if !app.has_git() {
         frame.render_widget(
@@ -471,15 +625,7 @@ fn scm_change_line(ch: &crate::git::Change, selected: bool, width: usize) -> Lin
 
 fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color(focused)))
-        .title(Span::styled(
-            " Explorer ",
-            Style::default().fg(dark().accent).bold(),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = area;
 
     // Reserve a column for a scrollbar when the tree overflows.
     let total = app.tree.rows.len();
@@ -489,6 +635,7 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         inner
     };
+    app.sidebar_body = Some(content);
 
     let height = content.height as usize;
     let width = content.width as usize;
@@ -507,16 +654,7 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
         .take(height)
         .map(|(i, row)| {
             let indent = "  ".repeat(row.depth);
-            let icon = if row.is_dir {
-                if row.expanded {
-                    "▾ "
-                } else {
-                    "▸ "
-                }
-            } else {
-                "  "
-            };
-            let label = format!("{indent}{icon}{}", row.name);
+            let (glyph, icol) = file_icon(&row.name, row.is_dir, row.expanded);
             if i == app.tree.selected {
                 // Pad to full width so the selection bar spans the pane.
                 let style = if focused {
@@ -524,14 +662,19 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Style::default().bg(dark().status_bg).fg(dark().fg)
                 };
+                let label = format!("{indent}{glyph} {}", row.name);
                 Line::from(Span::styled(format!("{label:<width$}"), style))
             } else {
-                let style = if row.is_dir {
-                    Style::default().fg(dark().accent)
+                let name_style = if row.is_dir {
+                    Style::default().fg(dark().accent).bold()
                 } else {
                     Style::default().fg(dark().fg)
                 };
-                Line::from(Span::styled(label, style))
+                Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(format!("{glyph} "), Style::default().fg(icol)),
+                    Span::styled(row.name.clone(), name_style),
+                ])
             }
         })
         .collect();
@@ -547,6 +690,7 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Editor;
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color(focused)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1097,6 +1241,7 @@ fn draw_find_bar(frame: &mut Frame, s: &Search, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().accent))
         .title(Span::styled(
             " Find — Esc · ↵ next · ↑ prev ",
@@ -1126,6 +1271,7 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark().border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1149,11 +1295,21 @@ fn draw_all_hidden(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Terminal;
     let bc = border_color(focused);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(bc));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let working = app.term_working();
+    let title = if working {
+        format!("{} TERMINAL", app.spinner())
+    } else {
+        "TERMINAL".to_string()
+    };
+    let pf = pane_frame(frame, area, &title, focused);
+    // Minimize chip on the right of the header (collapse to a rail).
+    if pf.header.width >= 4 {
+        let cy = pf.header.y;
+        let right = pf.header.x + pf.header.width;
+        let buf = frame.buffer_mut();
+        app.panel_collapse_hit = Some(header_chip(buf, right - 2, cy, "─", focused));
+    }
+    let inner = pf.content;
 
     // Split: terminal content on the left, a draggable vertical tab strip on the right.
     let strip_w = app
@@ -1193,6 +1349,7 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     app.panel_inner_right = inner.x + inner.width;
 
     let active = app.panel.active;
+    let blink = app.blink_on;
     let w = strip.width as usize;
     let avail = w.saturating_sub(2);
     let mut lines: Vec<Line> = app
@@ -1201,7 +1358,15 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let label: String = format!(" {}", t.name).chars().take(avail).collect();
+            // Status dot: the active tab pulses while its child is producing output ("working").
+            let dot = if i == active && working {
+                if blink { "●" } else { "○" }
+            } else if i == active {
+                "▸"
+            } else {
+                " "
+            };
+            let label: String = format!("{dot} {}", t.name).chars().take(avail).collect();
             let (name_style, x_style) = if i == active {
                 let s = Style::default().bg(dark().accent).fg(Color::Black);
                 (s, s)
@@ -1276,10 +1441,18 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Focus::Editor => "EDITOR",
         Focus::Terminal => "CLAUDE",
     };
-    let left = Line::from(vec![
+    let mut left_spans = vec![
         Span::styled(format!(" {focus} "), bg.fg(dark().accent).bold()),
         Span::styled(format!("{} ", app.status), bg),
-    ]);
+    ];
+    // A spinner while a terminal child is producing output ("working").
+    if app.term_working() {
+        left_spans.push(Span::styled(
+            format!("{} working… ", app.spinner()),
+            bg.fg(dark().accent),
+        ));
+    }
+    let left = Line::from(left_spans);
     let right = Line::from(Span::styled(
         format!(" {} help · {} sidebar · {} quit ", km.help, km.toggle_sidebar, km.quit),
         bg,
