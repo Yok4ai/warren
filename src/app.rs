@@ -43,6 +43,43 @@ pub enum SidebarMode {
     SourceControl,
 }
 
+/// Whether a clipboard'd file should be duplicated (Copy) or moved (Cut) on paste.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ClipMode {
+    Copy,
+    Cut,
+}
+
+/// An action in the explorer right-click context menu.
+#[derive(Clone, Copy, PartialEq)]
+pub enum MenuAction {
+    NewFile,
+    NewFolder,
+    Rename,
+    Copy,
+    Cut,
+    Paste,
+    Delete,
+}
+
+pub struct MenuItem {
+    pub label: &'static str,
+    pub action: MenuAction,
+    pub enabled: bool,
+}
+
+/// The explorer right-click context menu: a popup at `(x, y)` over a `target` row (None = empty
+/// space → operate on the project root).
+pub struct ContextMenu {
+    pub x: u16,
+    pub y: u16,
+    pub items: Vec<MenuItem>,
+    pub selected: usize,
+    pub target: Option<PathBuf>,
+    /// The menu's rendered rect (set each frame), used to map clicks to items.
+    pub rect: Rect,
+}
+
 /// A selectable row in the source-control view (flattened from changes + the expandable graph).
 #[derive(Clone)]
 pub enum ScmItem {
@@ -119,6 +156,14 @@ pub struct App {
     pub sidebar_rail: Option<Rect>,
     /// Per-frame: the explorer tree's content rect (where row 0 is drawn), for click→row mapping.
     pub sidebar_body: Option<Rect>,
+    /// Per-frame: explorer header "+" button cell (opens a New File / New Folder menu).
+    pub explorer_new_hit: Option<(u16, u16)>,
+    /// File clipboard for copy/cut → paste in the explorer.
+    pub file_clip: Option<(PathBuf, ClipMode)>,
+    /// The explorer right-click context menu, when open.
+    pub context_menu: Option<ContextMenu>,
+    /// A filesystem path awaiting delete confirmation.
+    pub delete_confirm: Option<PathBuf>,
     /// Per-frame: each pane's collapse control cell (the chevron in its header — click to collapse).
     pub sidebar_collapse_hit: Option<(u16, u16)>,
     pub panel_collapse_hit: Option<(u16, u16)>,
@@ -273,6 +318,10 @@ impl App {
             sidebar_collapsed: false,
             sidebar_rail: None,
             sidebar_body: None,
+            explorer_new_hit: None,
+            file_clip: None,
+            context_menu: None,
+            delete_confirm: None,
             sidebar_collapse_hit: None,
             panel_collapse_hit: None,
             editor_collapse_hit: None,
@@ -528,6 +577,13 @@ impl App {
     /// Handle a left-click on pane chrome: a pane's header collapse chevron, or a collapsed pane's
     /// rail (to expand). Returns true if the click was consumed, so content handling is skipped.
     fn handle_chrome_click(&mut self, col: u16, row: u16) -> bool {
+        // Explorer header "+" button → New File / New Folder menu, anchored just below it.
+        if hit_chevron(self.explorer_new_hit, col, row) {
+            if let Some((hx, hy)) = self.explorer_new_hit {
+                self.open_new_menu(hx.saturating_sub(1), hy + 1);
+            }
+            return true;
+        }
         // Collapse a pane via the chevron in its header (a ~2-cell target around the chevron).
         if hit_chevron(self.sidebar_collapse_hit, col, row) {
             self.sidebar_collapsed = true;
@@ -575,6 +631,39 @@ impl App {
             if matches!(m.kind, MouseEventKind::Moved) {
                 self.needs_redraw = true;
             }
+        }
+        // An open context menu captures the mouse: hover highlights items, a click runs the one
+        // under the cursor (or dismisses the menu when clicking outside it).
+        if self.context_menu.is_some() {
+            let r = self.context_menu.as_ref().unwrap().rect;
+            let item_idx = (rect_contains(r, m.column, m.row) && m.row > r.y)
+                .then(|| (m.row - r.y - 1) as usize);
+            match m.kind {
+                MouseEventKind::Moved => {
+                    if let Some(idx) = item_idx {
+                        let menu = self.context_menu.as_mut().unwrap();
+                        if idx < menu.items.len() && menu.selected != idx {
+                            menu.selected = idx;
+                            self.needs_redraw = true;
+                        }
+                    }
+                }
+                MouseEventKind::Down(_) => {
+                    let hit = item_idx.filter(|&idx| {
+                        let menu = self.context_menu.as_ref().unwrap();
+                        idx < menu.items.len() && menu.items[idx].enabled
+                    });
+                    if let Some(idx) = hit {
+                        let menu = self.context_menu.take().unwrap();
+                        self.run_menu_action(menu.items[idx].action, menu.target);
+                    } else {
+                        self.context_menu = None;
+                    }
+                    self.needs_redraw = true;
+                }
+                _ => {}
+            }
+            return;
         }
         let sidebar_open = self.sidebar_visible && !self.sidebar_collapsed;
         let in_sidebar = sidebar_open && m.column < self.sidebar_width;
@@ -766,6 +855,12 @@ impl App {
                     }
                 }
                 self.needs_redraw = true;
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Right-click in the explorer opens the file-ops context menu (on the row, or root).
+                if in_sidebar {
+                    self.open_context_menu(m.column, m.row);
+                }
             }
             MouseEventKind::Down(MouseButton::Middle) => {
                 // Middle-click a tab to close it (editor document tabs, or terminal strip tabs).
@@ -1155,6 +1250,14 @@ impl App {
             return;
         }
         // Modals capture all input until resolved.
+        if self.context_menu.is_some() {
+            self.handle_context_menu(key);
+            return;
+        }
+        if self.delete_confirm.is_some() {
+            self.handle_delete_confirm(key);
+            return;
+        }
         if self.close_confirm.is_some() {
             self.handle_close_confirm(key);
             return;
@@ -1423,6 +1526,18 @@ impl App {
             }
             self.focus = Focus::Terminal;
             self.status = format!("inserted {}", path.display());
+        } else if self.sidebar_visible && !self.sidebar_collapsed && col < self.sidebar_width {
+            // Dropped back in the explorer: move the file into the folder under the cursor (or its
+            // parent if a file, or the project root for empty space).
+            let target = self.sidebar_body.and_then(|body| {
+                if row < body.y {
+                    return None;
+                }
+                let idx = self.tree.scroll + (row - body.y) as usize;
+                self.tree.rows.get(idx).map(|r| r.path.clone())
+            });
+            let dir = self.target_dir(&target);
+            self.move_into(path, &dir);
         } else if self.editor_visible && rect_contains(self.editor_area, col, row) && path.is_file()
         {
             match self.editor.open(path) {
@@ -1433,6 +1548,34 @@ impl App {
                 }
                 Err(e) => self.status = format!("error: {e}"),
             }
+        }
+    }
+
+    /// Move `src` into directory `dir` (drag-to-move / cut-paste). Guards self-moves and collisions.
+    fn move_into(&mut self, src: &Path, dir: &Path) {
+        let Some(name) = src.file_name() else {
+            return;
+        };
+        let dest = dir.join(name);
+        if dest == src {
+            return;
+        }
+        if dest.starts_with(src) {
+            self.status = "can't move a folder into itself".into();
+            return;
+        }
+        if dest.exists() {
+            self.status = format!("already exists: {}", dest.display());
+            return;
+        }
+        match std::fs::rename(src, &dest) {
+            Ok(()) => {
+                self.editor.rename_path(src, &dest);
+                self.tree.reveal(&dest);
+                self.tree.rebuild();
+                self.status = format!("moved to {}", dest.display());
+            }
+            Err(e) => self.status = format!("error: {e}"),
         }
     }
 
@@ -1467,6 +1610,249 @@ impl App {
             })
             .unwrap_or_else(|| self.workspace.clone());
         self.prompt = Some(Prompt::new_file(base));
+    }
+
+    /// The directory of the current explorer selection (the selected folder, or a file's parent).
+    fn selected_dir(&self) -> PathBuf {
+        self.tree
+            .rows
+            .get(self.tree.selected)
+            .map(|r| {
+                if r.is_dir {
+                    r.path.clone()
+                } else {
+                    r.path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| self.workspace.clone())
+                }
+            })
+            .unwrap_or_else(|| self.workspace.clone())
+    }
+
+    fn open_new_folder_prompt(&mut self) {
+        self.prompt = Some(Prompt::new_folder(self.selected_dir()));
+    }
+
+    /// Map a screen row in the explorer to a tree path, selecting that row. None if past the list.
+    fn tree_row_at(&mut self, row: u16) -> Option<PathBuf> {
+        let body = self.sidebar_body?;
+        if row < body.y {
+            return None;
+        }
+        let idx = self.tree.scroll + (row - body.y) as usize;
+        if idx < self.tree.rows.len() {
+            self.tree.selected = idx;
+            Some(self.tree.rows[idx].path.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The directory to create-in / paste-into for a context target: a folder itself, a file's
+    /// parent, or the project root when there's no target.
+    fn target_dir(&self, target: &Option<PathBuf>) -> PathBuf {
+        match target {
+            Some(p) if p.is_dir() => p.clone(),
+            Some(p) => p
+                .parent()
+                .map(|x| x.to_path_buf())
+                .unwrap_or_else(|| self.workspace.clone()),
+            None => self.workspace.clone(),
+        }
+    }
+
+    /// Open the explorer right-click context menu at `(col, row)`, selecting the row under it.
+    fn open_context_menu(&mut self, col: u16, row: u16) {
+        self.focus = Focus::Sidebar;
+        let target = self.tree_row_at(row);
+        let has_target = target.is_some();
+        let mut items = vec![
+            MenuItem { label: "New File", action: MenuAction::NewFile, enabled: true },
+            MenuItem { label: "New Folder", action: MenuAction::NewFolder, enabled: true },
+        ];
+        if has_target {
+            items.push(MenuItem { label: "Rename", action: MenuAction::Rename, enabled: true });
+            items.push(MenuItem { label: "Copy", action: MenuAction::Copy, enabled: true });
+            items.push(MenuItem { label: "Cut", action: MenuAction::Cut, enabled: true });
+        }
+        items.push(MenuItem {
+            label: "Paste",
+            action: MenuAction::Paste,
+            enabled: self.file_clip.is_some(),
+        });
+        if has_target {
+            items.push(MenuItem { label: "Delete", action: MenuAction::Delete, enabled: true });
+        }
+        self.context_menu = Some(ContextMenu {
+            x: col,
+            y: row,
+            items,
+            selected: 0,
+            target,
+            rect: Rect::default(),
+        });
+        self.needs_redraw = true;
+    }
+
+    /// Open a small "New File / New Folder" menu (the explorer header "+" button), targeting the
+    /// current selection so items are created in the selected folder (or a file's parent).
+    fn open_new_menu(&mut self, col: u16, row: u16) {
+        self.focus = Focus::Sidebar;
+        let target = self.tree.rows.get(self.tree.selected).map(|r| r.path.clone());
+        let items = vec![
+            MenuItem { label: "New File", action: MenuAction::NewFile, enabled: true },
+            MenuItem { label: "New Folder", action: MenuAction::NewFolder, enabled: true },
+        ];
+        self.context_menu = Some(ContextMenu {
+            x: col,
+            y: row,
+            items,
+            selected: 0,
+            target,
+            rect: Rect::default(),
+        });
+        self.needs_redraw = true;
+    }
+
+    /// Run a context-menu action against its target.
+    fn run_menu_action(&mut self, action: MenuAction, target: Option<PathBuf>) {
+        match action {
+            MenuAction::NewFile => {
+                let base = self.target_dir(&target);
+                self.prompt = Some(Prompt::new_file(base));
+            }
+            MenuAction::NewFolder => {
+                let base = self.target_dir(&target);
+                self.prompt = Some(Prompt::new_folder(base));
+            }
+            MenuAction::Rename => {
+                if let Some(p) = target {
+                    self.prompt = Some(Prompt::rename(p));
+                }
+            }
+            MenuAction::Copy => {
+                if let Some(p) = target {
+                    self.status = format!("copied {}", p.display());
+                    self.file_clip = Some((p, ClipMode::Copy));
+                }
+            }
+            MenuAction::Cut => {
+                if let Some(p) = target {
+                    self.status = format!("cut {}", p.display());
+                    self.file_clip = Some((p, ClipMode::Cut));
+                }
+            }
+            MenuAction::Paste => self.paste_clip(self.target_dir(&target)),
+            MenuAction::Delete => self.delete_confirm = target,
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Paste the file clipboard into `dir`: copy → duplicate (with a `_copy` suffix on collision),
+    /// cut → move (then clear the clipboard).
+    fn paste_clip(&mut self, dir: PathBuf) {
+        let Some((src, mode)) = self.file_clip.clone() else {
+            return;
+        };
+        let Some(name) = src.file_name() else {
+            return;
+        };
+        let dest = dir.join(name);
+        match mode {
+            ClipMode::Copy => {
+                let dest = unique_dest(dest);
+                if let Err(e) = copy_recursive(&src, &dest) {
+                    self.status = format!("error: {e}");
+                    return;
+                }
+                self.status = format!("pasted {}", dest.display());
+                self.tree.reveal(&dest);
+            }
+            ClipMode::Cut => {
+                if dest == src {
+                    return;
+                }
+                if dest.exists() {
+                    self.status = format!("already exists: {}", dest.display());
+                    return;
+                }
+                if let Err(e) = std::fs::rename(&src, &dest) {
+                    self.status = format!("error: {e}");
+                    return;
+                }
+                self.editor.rename_path(&src, &dest);
+                self.file_clip = None;
+                self.status = format!("moved to {}", dest.display());
+                self.tree.reveal(&dest);
+            }
+        }
+        self.tree.rebuild();
+        self.needs_redraw = true;
+    }
+
+    /// Copy/cut the selected explorer item to the file clipboard.
+    fn clip_selected(&mut self, mode: ClipMode) {
+        if let Some(row) = self.tree.rows.get(self.tree.selected) {
+            let p = row.path.clone();
+            self.status = match mode {
+                ClipMode::Copy => format!("copied {}", p.display()),
+                ClipMode::Cut => format!("cut {}", p.display()),
+            };
+            self.file_clip = Some((p, mode));
+        }
+    }
+
+    fn handle_context_menu(&mut self, key: KeyEvent) {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.context_menu = None,
+            KeyCode::Up => {
+                menu.selected = menu.selected.checked_sub(1).unwrap_or(menu.items.len() - 1);
+            }
+            KeyCode::Down => {
+                menu.selected = (menu.selected + 1) % menu.items.len();
+            }
+            KeyCode::Enter => {
+                let item = &menu.items[menu.selected];
+                if item.enabled {
+                    let (action, target) = (item.action, menu.target.clone());
+                    self.context_menu = None;
+                    self.run_menu_action(action, target);
+                }
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    fn handle_delete_confirm(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => self.confirm_delete(),
+            _ => self.delete_confirm = None,
+        }
+        self.needs_redraw = true;
+    }
+
+    fn confirm_delete(&mut self) {
+        let Some(path) = self.delete_confirm.take() else {
+            return;
+        };
+        let res = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match res {
+            Ok(()) => {
+                self.editor.close_paths_under(&path);
+                self.tree.rebuild();
+                self.status = format!("deleted {}", path.display());
+            }
+            Err(e) => self.status = format!("error: {e}"),
+        }
     }
 
     fn handle_prompt(&mut self, key: KeyEvent) {
@@ -1537,6 +1923,44 @@ impl App {
                         self.editor_visible = true;
                         self.focus = Focus::Editor;
                         self.status = format!("created {}", path.display());
+                    }
+                    Err(e) => self.status = format!("error: {e}"),
+                }
+            }
+            PromptKind::NewFolder { base } => {
+                let name = prompt.input.trim();
+                if name.is_empty() {
+                    return;
+                }
+                let path = base.join(name);
+                match std::fs::create_dir_all(&path) {
+                    Ok(()) => {
+                        self.tree.reveal(&path);
+                        self.tree.rebuild();
+                        self.status = format!("created {}/", path.display());
+                    }
+                    Err(e) => self.status = format!("error: {e}"),
+                }
+            }
+            PromptKind::Rename { path } => {
+                let name = prompt.input.trim();
+                if name.is_empty() {
+                    return;
+                }
+                let dest = path.parent().map(|p| p.join(name)).unwrap_or_else(|| name.into());
+                if dest == path {
+                    return;
+                }
+                if dest.exists() {
+                    self.status = format!("already exists: {}", dest.display());
+                    return;
+                }
+                match std::fs::rename(&path, &dest) {
+                    Ok(()) => {
+                        self.editor.rename_path(&path, &dest);
+                        self.tree.reveal(&dest);
+                        self.tree.rebuild();
+                        self.status = format!("renamed to {}", dest.display());
                     }
                     Err(e) => self.status = format!("error: {e}"),
                 }
@@ -2021,12 +2445,25 @@ impl App {
     fn handle_sidebar(&mut self, key: KeyEvent) {
         match self.sidebar_mode {
             SidebarMode::Explorer => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let sel = self.tree.rows.get(self.tree.selected).map(|r| r.path.clone());
                 match key.code {
                     KeyCode::Up => self.tree.move_up(),
                     KeyCode::Down => self.tree.move_down(),
                     KeyCode::Right => self.tree.expand(),
                     KeyCode::Left => self.tree.collapse(),
                     KeyCode::Enter => self.activate_selected(),
+                    // File operations: F2 rename · Del delete · ctrl+c/x/v copy/cut/paste · n new folder.
+                    KeyCode::F(2) => {
+                        if let Some(p) = sel {
+                            self.prompt = Some(Prompt::rename(p));
+                        }
+                    }
+                    KeyCode::Delete => self.delete_confirm = sel,
+                    KeyCode::Char('c') if ctrl => self.clip_selected(ClipMode::Copy),
+                    KeyCode::Char('x') if ctrl => self.clip_selected(ClipMode::Cut),
+                    KeyCode::Char('v') if ctrl => self.paste_clip(self.selected_dir()),
+                    KeyCode::Char('n') if !ctrl => self.open_new_folder_prompt(),
                     _ => {}
                 }
                 let vp = self.tree.viewport;
@@ -2523,6 +2960,52 @@ fn is_ctrl_tilde(code: KeyCode, mods: KeyModifiers) -> bool {
 /// either neighbor (the button is a 3-cell pill, so accept the full width).
 fn hit_chevron(hit: Option<(u16, u16)>, col: u16, row: u16) -> bool {
     hit.is_some_and(|(hx, hy)| hy == row && (hx.saturating_sub(1)..=hx + 1).contains(&col))
+}
+
+/// A non-colliding destination: if `dest` exists, insert `_copy` (then `_copy2`, …) before the
+/// extension until the name is free.
+fn unique_dest(dest: PathBuf) -> PathBuf {
+    if !dest.exists() {
+        return dest;
+    }
+    let parent = dest.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 1..1000 {
+        let suffix = if n == 1 {
+            "_copy".to_string()
+        } else {
+            format!("_copy{n}")
+        };
+        let cand = parent.join(format!("{stem}{suffix}{ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    dest
+}
+
+/// Recursively copy a file or directory tree from `src` to `dest`.
+fn copy_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        if let Some(p) = dest.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        std::fs::copy(src, dest).map(|_| ())
+    }
 }
 
 /// Copy text to the system clipboard via the OSC 52 terminal escape. Works in kitty (and most

@@ -899,6 +899,42 @@ impl Editor {
         }
     }
 
+    /// Update open tabs after a rename/move: any tab at `old` (or under it, if `old` was a folder)
+    /// has its path/name rewritten to sit under `new`.
+    pub fn rename_path(&mut self, old: &Path, new: &Path) {
+        for b in &mut self.tabs {
+            let rel = if b.path == old {
+                Some(PathBuf::new())
+            } else {
+                b.path.strip_prefix(old).ok().map(|p| p.to_path_buf())
+            };
+            if let Some(rel) = rel {
+                b.path = if rel.as_os_str().is_empty() {
+                    new.to_path_buf()
+                } else {
+                    new.join(rel)
+                };
+                b.name = b
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    /// Close any tabs whose file is `prefix` or lives under it (used after a delete).
+    pub fn close_paths_under(&mut self, prefix: &Path) {
+        let mut i = 0;
+        while i < self.tabs.len() {
+            if self.tabs[i].path == prefix || self.tabs[i].path.starts_with(prefix) {
+                self.close_at(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Reload an open file from disk when the watcher reports it changed. Unsaved buffers are
     /// protected, and unchanged content (e.g. our own save) is ignored so the cursor doesn't jump.
     pub fn reload(&mut self, path: &Path) {

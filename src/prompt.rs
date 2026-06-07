@@ -8,6 +8,10 @@ use std::path::PathBuf;
 pub enum PromptKind {
     /// Create a new file relative to `base`.
     NewFile { base: PathBuf },
+    /// Create a new folder relative to `base`.
+    NewFolder { base: PathBuf },
+    /// Rename the item at `path` to the entered name (within the same parent).
+    Rename { path: PathBuf },
     /// Commit the staged changes with the entered message.
     Commit,
 }
@@ -27,6 +31,30 @@ impl Prompt {
             input: String::new(),
             cursor: 0,
             kind: PromptKind::NewFile { base },
+        }
+    }
+
+    pub fn new_folder(base: PathBuf) -> Self {
+        Self {
+            title: "New folder".into(),
+            input: String::new(),
+            cursor: 0,
+            kind: PromptKind::NewFolder { base },
+        }
+    }
+
+    /// Rename prompt, prefilled with the current name and cursor at the end.
+    pub fn rename(path: PathBuf) -> Self {
+        let input = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cursor = input.chars().count();
+        Self {
+            title: "Rename".into(),
+            input,
+            cursor,
+            kind: PromptKind::Rename { path },
         }
     }
 

@@ -133,15 +133,9 @@ fn pane_label(
     (content, collapse_button(frame, area, collapse, hover))
 }
 
-/// Draw a collapse button — a 3-cell pill at the right of a header `area`'s first row — and return
-/// its center cell. The pill highlights (accent fill) when the mouse hovers it, otherwise it's a
-/// subtle raised chip with an accent chevron. Clicks across its width count (see `hit_chevron`).
-fn collapse_button(frame: &mut Frame, area: Rect, glyph: char, hover: (u16, u16)) -> Option<(u16, u16)> {
-    if area.width < 5 {
-        return None;
-    }
-    let y = area.y;
-    let x0 = area.x + area.width - 4; // 3-cell pill, leaving one trailing margin column
+/// Draw a 3-cell pill button with `glyph` centered, at columns `[x0, x0+2]` of row `y`. Highlights
+/// (accent fill) on hover, otherwise a subtle raised chip. Returns the center cell.
+fn pill_button(frame: &mut Frame, x0: u16, y: u16, glyph: char, hover: (u16, u16)) -> (u16, u16) {
     let center = x0 + 1;
     let hovered = hover.1 == y && (x0..x0 + 3).contains(&hover.0);
     let (bg, fg) = if hovered {
@@ -163,7 +157,15 @@ fn collapse_button(frame: &mut Frame, area: Rect, glyph: char, hover: (u16, u16)
             c.set_style(s);
         }
     }
-    Some((center, y))
+    (center, y)
+}
+
+/// The collapse button: a pill at the right of a header `area`'s first row (one trailing margin).
+fn collapse_button(frame: &mut Frame, area: Rect, glyph: char, hover: (u16, u16)) -> Option<(u16, u16)> {
+    if area.width < 5 {
+        return None;
+    }
+    Some(pill_button(frame, area.x + area.width - 4, area.y, glyph, hover))
 }
 
 /// A unicode-safe icon + color for a tree row, by kind/extension.
@@ -344,6 +346,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.sidebar_rail = None;
     app.sidebar_body = None;
     app.sidebar_collapse_hit = None;
+    app.explorer_new_hit = None;
     app.panel_collapse_hit = None;
     app.editor_collapse_hit = None;
     app.sidebar_divider_col = None;
@@ -378,8 +381,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_confirm(frame, name, frame.area());
         }
     }
+    if let Some(path) = app.delete_confirm.clone() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let kind = if path.is_dir() { "folder" } else { "file" };
+        draw_delete_confirm(frame, &name, kind, frame.area());
+    }
     if app.show_help {
         draw_help(frame, app, frame.area());
+    }
+    if app.context_menu.is_some() {
+        draw_context_menu(frame, app, frame.area());
     }
     if app.dragging {
         draw_drag_label(frame, app, frame.area());
@@ -501,6 +515,81 @@ fn draw_confirm(frame: &mut Frame, name: &str, area: Rect) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
+/// A centered confirm dialog for deleting a file/folder.
+fn draw_delete_confirm(frame: &mut Frame, name: &str, kind: &str, area: Rect) {
+    let w = area.width.saturating_sub(8).clamp(34, 64);
+    let h = 5;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 3;
+    let rect = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(dark().diff_del_fg))
+        .title(Span::styled(
+            " Delete ",
+            Style::default().fg(dark().diff_del_fg).bold(),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let key = |k: &'static str| Span::styled(k, Style::default().fg(dark().accent).bold());
+    let dim = |t: &str| Span::styled(t.to_string(), Style::default().fg(dark().dim));
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("Delete {kind} \"{name}\"? This can't be undone."),
+            Style::default().fg(dark().fg),
+        )),
+        Line::from(""),
+        Line::from(vec![key("[Y]"), dim("es   "), key("[N]"), dim("o")]),
+    ];
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
+/// The explorer right-click context menu: a small popup list, clamped to the screen. Stores its
+/// rendered rect on the menu for click mapping.
+fn draw_context_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(menu) = app.context_menu.as_mut() else {
+        return;
+    };
+    let label_w = menu.items.iter().map(|i| i.label.len()).max().unwrap_or(4) as u16;
+    let w = (label_w + 4).min(screen.width.max(6));
+    let h = menu.items.len() as u16 + 2;
+    // Anchor at the cursor, clamped so the menu stays fully on-screen.
+    let x = menu.x.min(screen.right().saturating_sub(w));
+    let y = menu.y.min(screen.bottom().saturating_sub(h));
+    let rect = Rect::new(x, y, w, h);
+    menu.rect = rect;
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(dark().accent));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let style = if !item.enabled {
+                Style::default().fg(dark().dim)
+            } else if i == menu.selected {
+                Style::default().bg(dark().accent).fg(Color::Black).bold()
+            } else {
+                Style::default().fg(dark().fg)
+            };
+            let iw = inner.width as usize;
+            Line::from(Span::styled(format!(" {:<iw$}", item.label), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The command palette: an input line plus a scrolling, fuzzy-filtered results list.
 fn draw_palette(frame: &mut Frame, p: &Palette, area: Rect) {
     let w = (area.width * 3 / 5).clamp(40, 90).min(area.width.saturating_sub(2));
@@ -615,6 +704,11 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let (content, hit) = pane_label(frame, area, &title, focused, '‹', app.hover);
     app.sidebar_collapse_hit = hit;
+    // Explorer header "+" button (New File / New Folder), a pill just left of the collapse button.
+    if app.sidebar_mode == SidebarMode::Explorer && area.width >= 9 {
+        let x0 = (area.x + area.width).saturating_sub(8); // 3-cell pill + 1 gap before collapse
+        app.explorer_new_hit = Some(pill_button(frame, x0, area.y, '+', app.hover));
+    }
     match app.sidebar_mode {
         SidebarMode::Explorer => draw_explorer(frame, app, content),
         SidebarMode::SourceControl => draw_scm(frame, app, content),
