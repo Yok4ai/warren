@@ -1226,13 +1226,9 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let blink = app.blink_on;
     if let Some(t) = app.panel.active_mut() {
         t.resize(term_content.height, term_content.width);
-        let parser = t.lock();
-        // Cursor blinks (via visibility) when the panel is focused; hidden otherwise.
-        let cursor = tui_term::widget::Cursor::default()
-            .visibility(focused && blink)
-            .overlay_style(Style::default().bg(dark().accent).fg(Color::Black));
-        let term = tui_term::widget::PseudoTerminal::new(parser.screen()).cursor(cursor);
-        frame.render_widget(term, term_content);
+        // Blit alacritty's grid into the buffer; cursor blinks when focused (see `render_term`).
+        let buf = frame.buffer_mut();
+        t.with_term(|term| crate::terminal::render_term(term, term_content, buf, focused, blink));
     }
 
     // Scrollbar over the reserved column: history modelled as `max + view` lines, view top at

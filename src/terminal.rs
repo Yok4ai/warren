@@ -1,35 +1,89 @@
 //! A terminal pane: a child process (e.g. `claude`) running in a pseudo-terminal, its output
-//! parsed by `vt100` for rendering with `tui-term`. Keyboard/mouse/paste are translated to the
-//! byte sequences a real terminal would send. The reader thread pushes redraw/exit events into
-//! the app funnel. (Distilled from the Phase 0 proof.)
+//! parsed by `alacritty_terminal` (Alacritty's own VT engine) and blitted to ratatui by
+//! `render_term`. Keyboard/mouse/paste are translated to the byte sequences a real terminal would
+//! send. The reader thread parses bytes into the shared `Term` and pushes redraw/exit events into
+//! the app funnel. A separate writer thread serializes all PTY writes (app input + the emulator's
+//! own replies), so the parse thread never blocks on a lock the app holds.
 
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
 use tokio::sync::mpsc::UnboundedSender;
 
+use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
+
 use crate::event::AppEvent;
+use crate::theme::current as theme;
+
+/// Lines of scrollback to retain per terminal.
+const SCROLLBACK: usize = 5000;
+
+/// Bridges the emulator to warren: replies the emulator must send back to the child (DA/DSR/cursor
+/// reports, etc., via [`Event::PtyWrite`]) are pushed to the writer thread; everything else just
+/// nudges a redraw. Runs on the parse thread, so it only ever *sends* on channels — never locks.
+#[derive(Clone)]
+pub(crate) struct WarrenListener {
+    pty_write: mpsc::Sender<Vec<u8>>,
+    redraw: UnboundedSender<AppEvent>,
+}
+
+impl EventListener for WarrenListener {
+    fn send_event(&self, event: Event) {
+        // Apps block waiting for these replies (e.g. Device Attributes on startup), so they must
+        // reach the PTY. Title/Bell/Clipboard/ColorRequest are ignored: clipboard is handled
+        // app-side via OSC52, the title isn't shown, and the bell is silent.
+        if let Event::PtyWrite(s) = event {
+            let _ = self.pty_write.send(s.into_bytes());
+        }
+        let _ = self.redraw.send(AppEvent::PtyChanged);
+    }
+}
+
+/// Pane dimensions handed to alacritty for construction/resize (it reads columns + screen lines;
+/// scrollback depth comes from `Config`, so `total_lines` just mirrors the visible rows).
+struct PaneDims {
+    cols: usize,
+    rows: usize,
+}
+
+impl Dimensions for PaneDims {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
 
 pub struct TerminalPane {
     /// Tab label (e.g. "claude", "fish").
     pub name: String,
-    parser: Arc<Mutex<vt100::Parser>>,
-    writer: Box<dyn Write + Send>,
+    term: Arc<Mutex<Term<WarrenListener>>>,
+    /// All PTY writes funnel through here to the writer thread (keeps a single writer).
+    pty_write: mpsc::Sender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
     rows: u16,
     cols: u16,
     /// Set once the child exits (reader hit EOF).
     exited: Arc<AtomicBool>,
 }
-
-/// Lines of scrollback to retain per terminal.
-const SCROLLBACK: usize = 5000;
 
 impl TerminalPane {
     /// Spawn `command` in a PTY of the given size, inheriting the environment and running in `cwd`.
@@ -42,9 +96,10 @@ impl TerminalPane {
         tx: UnboundedSender<AppEvent>,
         extra_env: &[(String, String)],
     ) -> Result<Self> {
+        let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system().openpty(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
@@ -63,25 +118,50 @@ impl TerminalPane {
         let mut child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(
-            rows.max(1),
-            cols.max(1),
-            SCROLLBACK,
+        // Writer thread: owns the PTY writer and drains a channel fed by both app input and the
+        // emulator's own replies, so writes are serialized and the parse thread never blocks here.
+        let (pty_write, pty_rx) = mpsc::channel::<Vec<u8>>();
+        let mut writer = pair.master.take_writer()?;
+        std::thread::spawn(move || {
+            while let Ok(bytes) = pty_rx.recv() {
+                if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+
+        let config = Config {
+            scrolling_history: SCROLLBACK,
+            ..Default::default()
+        };
+        let listener = WarrenListener {
+            pty_write: pty_write.clone(),
+            redraw: tx.clone(),
+        };
+        let term = Arc::new(Mutex::new(Term::new(
+            config,
+            &PaneDims {
+                cols: cols as usize,
+                rows: rows as usize,
+            },
+            listener,
         )));
-        let writer = pair.master.take_writer()?;
+
         let mut reader = pair.master.try_clone_reader()?;
         let exited = Arc::new(AtomicBool::new(false));
 
         {
-            let parser = parser.clone();
+            let term = term.clone();
             let exited = exited.clone();
             std::thread::spawn(move || {
+                // The VT parser is single-threaded state local to this thread; only `Term` is shared.
+                let mut parser: Processor = Processor::new();
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            parser.lock().unwrap().process(&buf[..n]);
+                            parser.advance(&mut *term.lock().unwrap(), &buf[..n]);
                             let _ = tx.send(AppEvent::PtyChanged);
                         }
                     }
@@ -96,11 +176,11 @@ impl TerminalPane {
 
         Ok(Self {
             name: name.to_string(),
-            parser,
-            writer,
+            term,
+            pty_write,
             master: pair.master,
-            rows: rows.max(1),
-            cols: cols.max(1),
+            rows,
+            cols,
             exited,
         })
     }
@@ -109,12 +189,13 @@ impl TerminalPane {
         self.exited.load(Ordering::Relaxed)
     }
 
-    /// Lock the parser to read its screen for rendering.
-    pub fn lock(&self) -> MutexGuard<'_, vt100::Parser> {
-        self.parser.lock().unwrap()
+    /// Run `f` with the shared `Term` locked — used by the renderer (`render_term`). Keeps the
+    /// concrete event-listener type private to this module.
+    pub(crate) fn with_term<R>(&self, f: impl FnOnce(&Term<WarrenListener>) -> R) -> R {
+        f(&self.term.lock().unwrap())
     }
 
-    /// Resize the PTY (and parser) to match the rendered area, if changed.
+    /// Resize the PTY (and emulator) to match the rendered area, if changed.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let (rows, cols) = (rows.max(1), cols.max(1));
         if rows == self.rows && cols == self.cols {
@@ -122,7 +203,11 @@ impl TerminalPane {
         }
         self.rows = rows;
         self.cols = cols;
-        self.parser.lock().unwrap().set_size(rows, cols);
+        // Note: TermSize is column-first (the opposite of warren's (rows, cols) convention).
+        self.term.lock().unwrap().resize(PaneDims {
+            cols: cols as usize,
+            rows: rows as usize,
+        });
         let _ = self.master.resize(PtySize {
             rows,
             cols,
@@ -131,15 +216,14 @@ impl TerminalPane {
         });
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+    fn write(&self, bytes: &[u8]) {
+        let _ = self.pty_write.send(bytes.to_vec());
     }
 
     pub fn send_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         // In application-cursor-keys mode (DECCKM, set by ncurses apps like ranger/vim) the arrow
         // and Home/End keys must be sent as SS3 (ESC O x) rather than CSI (ESC [ x).
-        let app_cursor = self.parser.lock().unwrap().screen().application_cursor();
+        let app_cursor = self.term.lock().unwrap().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_to_bytes(code, mods, app_cursor) {
             self.write(&bytes);
         }
@@ -155,64 +239,218 @@ impl TerminalPane {
     /// scrolling, so the wheel goes to them; normal-screen apps (claude, shells) scroll our
     /// scrollback instead.
     pub fn in_alt_screen(&self) -> bool {
-        self.parser.lock().unwrap().screen().alternate_screen()
+        self.term.lock().unwrap().mode().contains(TermMode::ALT_SCREEN)
     }
 
     /// True if the app has requested mouse reporting (claude); a plain click is only forwarded
     /// in that case, so clicks in a mouse-unaware shell don't inject escape bytes.
     pub fn wants_mouse(&self) -> bool {
-        self.parser.lock().unwrap().screen().mouse_protocol_mode()
-            != vt100::MouseProtocolMode::None
+        self.term.lock().unwrap().mode().intersects(TermMode::MOUSE_MODE)
     }
 
-    /// Text of the selection between two `(row, col)` cells (inclusive of the cursor cell),
-    /// read from the currently visible grid (so it respects the scrollback position).
+    /// Text of the selection between two visible `(row, col)` cells (inclusive of both), read
+    /// scrollback-aware: a viewport row maps to grid line `row - display_offset`.
     pub fn selection_text(&self, anchor: (u16, u16), cursor: (u16, u16)) -> String {
         let (a, b) = if anchor <= cursor {
             (anchor, cursor)
         } else {
             (cursor, anchor)
         };
-        let p = self.parser.lock().unwrap();
-        let screen = p.screen();
-        let (_, cols) = screen.size();
-        screen.contents_between(a.0, a.1, b.0, (b.1 + 1).min(cols))
+        let t = self.term.lock().unwrap();
+        let off = t.grid().display_offset() as i32;
+        let start = Point::new(Line(a.0 as i32 - off), Column(a.1 as usize));
+        let end = Point::new(Line(b.0 as i32 - off), Column(b.1 as usize));
+        t.bounds_to_string(start, end)
     }
 
-    /// Scroll the local scrollback buffer by `delta` lines (positive = back into history).
-    /// vt100 clamps to the available scrollback and keeps the view anchored as new output arrives.
+    /// Scroll the scrollback by `delta` lines (positive = back into history). alacritty clamps.
     pub fn scroll(&mut self, delta: i32) {
-        let mut p = self.parser.lock().unwrap();
-        let cur = p.screen().scrollback() as i64;
-        let new = (cur + delta as i64).max(0) as usize;
-        p.set_scrollback(new);
+        self.term.lock().unwrap().scroll_display(Scroll::Delta(delta));
     }
 
     /// Jump back to live output (bottom of the scrollback).
     pub fn scroll_to_bottom(&mut self) {
-        self.parser.lock().unwrap().set_scrollback(0);
+        self.term.lock().unwrap().scroll_display(Scroll::Bottom);
     }
 
-    /// `(current offset, max offset)` lines above the live view. The max is found by asking vt100
-    /// for an impossible scrollback (it clamps to the real size) and restoring the position.
+    /// `(current offset, max offset)` lines above the live view.
     pub fn scrollback_state(&self) -> (usize, usize) {
-        let mut p = self.parser.lock().unwrap();
-        let cur = p.screen().scrollback();
-        p.set_scrollback(usize::MAX);
-        let max = p.screen().scrollback();
-        p.set_scrollback(cur);
-        (cur, max)
+        let t = self.term.lock().unwrap();
+        (t.grid().display_offset(), t.grid().history_size())
     }
 
-    /// Set the scrollback position to exactly `offset` lines above the live view (vt100 clamps).
+    /// Set the scrollback position to exactly `offset` lines above the live view (clamped).
     pub fn set_scrollback_offset(&mut self, offset: usize) {
-        self.parser.lock().unwrap().set_scrollback(offset);
+        let mut t = self.term.lock().unwrap();
+        let max = t.grid().history_size();
+        let cur = t.grid().display_offset() as i32;
+        let delta = offset.min(max) as i32 - cur;
+        if delta != 0 {
+            t.scroll_display(Scroll::Delta(delta));
+        }
     }
 
     /// Forward a mouse event with coordinates already made relative to the pane (1-based).
     pub fn send_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
         if let Some(bytes) = mouse_to_bytes(kind, col, row) {
             self.write(&bytes);
+        }
+    }
+}
+
+/// Blit the terminal's visible grid into `area` of `buf`. `focused`/`blink` gate the cursor overlay
+/// (matches the old block-cursor behavior: shown only when the panel is focused and blinking on).
+pub fn render_term<T: EventListener>(
+    term: &Term<T>,
+    area: Rect,
+    buf: &mut Buffer,
+    focused: bool,
+    blink: bool,
+) {
+    let content = term.renderable_content();
+    let offset = content.display_offset as i32;
+    for indexed in content.display_iter {
+        // Skip the second half of wide glyphs: ratatui reserves the next column when we write a
+        // 2-wide symbol, so painting the spacer would shear the line.
+        if indexed
+            .cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        // Viewport row: display_iter's top line is Line(-display_offset).
+        let row = indexed.point.line.0 + offset;
+        let col = indexed.point.column.0 as i32;
+        if row < 0 || col < 0 {
+            continue;
+        }
+        let (x, y) = (area.x + col as u16, area.y + row as u16);
+        if x >= area.right() || y >= area.bottom() {
+            continue;
+        }
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            let c = indexed.cell;
+            let ch = if c.flags.contains(Flags::HIDDEN) { ' ' } else { c.c };
+            cell.set_symbol(&ch.to_string());
+            cell.set_style(style_from(c.fg, c.bg, c.flags));
+        }
+    }
+
+    // Cursor overlay last so it wins, only at the live view (alacritty hides it when scrolled back).
+    if focused && blink && content.display_offset == 0 && content.cursor.shape != CursorShape::Hidden
+    {
+        let row = content.cursor.point.line.0 + offset;
+        let col = content.cursor.point.column.0 as i32;
+        if row >= 0 && col >= 0 {
+            let (x, y) = (area.x + col as u16, area.y + row as u16);
+            if x < area.right() && y < area.bottom() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_style(Style::default().bg(theme().accent).fg(Color::Black));
+                }
+            }
+        }
+    }
+}
+
+/// Build a ratatui style from an alacritty cell's colors and flags.
+fn style_from(fg: AnsiColor, bg: AnsiColor, flags: Flags) -> Style {
+    let (mut f, mut b) = (color_to_ratatui(fg, true), color_to_ratatui(bg, false));
+    if flags.contains(Flags::INVERSE) {
+        std::mem::swap(&mut f, &mut b);
+    }
+    let mut style = Style::default().fg(f);
+    // Leave the default background as Reset so a transparent terminal shows through (CLAUDE.md:
+    // don't paint a solid bg). Only set an explicit, non-default bg.
+    if b != Color::Reset {
+        style = style.bg(b);
+    }
+    let mut m = Modifier::empty();
+    if flags.contains(Flags::BOLD) {
+        m |= Modifier::BOLD;
+    }
+    if flags.contains(Flags::ITALIC) {
+        m |= Modifier::ITALIC;
+    }
+    if flags.intersects(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE) {
+        m |= Modifier::UNDERLINED;
+    }
+    if flags.contains(Flags::DIM) {
+        m |= Modifier::DIM;
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        m |= Modifier::CROSSED_OUT;
+    }
+    style.add_modifier(m)
+}
+
+/// Map an alacritty color to ratatui. Named/indexed ANSI use ratatui's named ANSI variants so the
+/// host terminal renders them with its own palette. `is_fg` picks the default foreground/background.
+fn color_to_ratatui(c: AnsiColor, is_fg: bool) -> Color {
+    match c {
+        AnsiColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+        AnsiColor::Indexed(i) => ansi_index(i),
+        AnsiColor::Named(n) => match n {
+            NamedColor::Foreground | NamedColor::BrightForeground => theme().fg,
+            NamedColor::Background => Color::Reset,
+            NamedColor::Cursor => theme().accent,
+            NamedColor::DimForeground => theme().dim,
+            // The remaining named colors are the 16 ANSI (incl. Dim* which map to their base).
+            other => ansi_index(named_ansi_index(other, is_fg)),
+        },
+    }
+}
+
+/// ANSI/256 palette index → ratatui color. 0..=15 use named variants (host palette); 16..=255 pass
+/// through as a 256-color index.
+fn ansi_index(i: u8) -> Color {
+    match i {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        15 => Color::White,
+        n => Color::Indexed(n),
+    }
+}
+
+/// The 0..=15 palette index for a named ANSI color (Dim* fold onto their base color; the DIM
+/// attribute is applied separately via the cell flags). Falls back to the default fg/bg index.
+fn named_ansi_index(n: NamedColor, is_fg: bool) -> u8 {
+    match n {
+        NamedColor::Black | NamedColor::DimBlack => 0,
+        NamedColor::Red | NamedColor::DimRed => 1,
+        NamedColor::Green | NamedColor::DimGreen => 2,
+        NamedColor::Yellow | NamedColor::DimYellow => 3,
+        NamedColor::Blue | NamedColor::DimBlue => 4,
+        NamedColor::Magenta | NamedColor::DimMagenta => 5,
+        NamedColor::Cyan | NamedColor::DimCyan => 6,
+        NamedColor::White | NamedColor::DimWhite => 7,
+        NamedColor::BrightBlack => 8,
+        NamedColor::BrightRed => 9,
+        NamedColor::BrightGreen => 10,
+        NamedColor::BrightYellow => 11,
+        NamedColor::BrightBlue => 12,
+        NamedColor::BrightMagenta => 13,
+        NamedColor::BrightCyan => 14,
+        NamedColor::BrightWhite => 15,
+        _ => {
+            if is_fg {
+                7
+            } else {
+                0
+            }
         }
     }
 }
@@ -406,4 +644,51 @@ fn mouse_to_bytes(kind: MouseEventKind, col: u16, row: u16) -> Option<Vec<u8>> {
     };
     let end = if press { 'M' } else { 'm' };
     Some(format!("\x1b[<{cb};{col};{row}{end}").into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_passthrough() {
+        let s = style_from(
+            AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb { r: 10, g: 20, b: 30 }),
+            AnsiColor::Named(NamedColor::Background),
+            Flags::empty(),
+        );
+        assert_eq!(s.fg, Some(Color::Rgb(10, 20, 30)));
+        // Default background stays unset (Reset) so transparency shows through.
+        assert_eq!(s.bg, None);
+    }
+
+    #[test]
+    fn ansi_named_and_256() {
+        assert_eq!(ansi_index(1), Color::Red);
+        assert_eq!(ansi_index(9), Color::LightRed);
+        assert_eq!(ansi_index(200), Color::Indexed(200));
+    }
+
+    #[test]
+    fn flags_to_modifiers() {
+        let s = style_from(
+            AnsiColor::Named(NamedColor::Red),
+            AnsiColor::Named(NamedColor::Background),
+            Flags::BOLD | Flags::UNDERLINE,
+        );
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn inverse_swaps_colors() {
+        // Inverse with a real bg color: fg/bg should swap, so bg becomes set and fg the old bg.
+        let s = style_from(
+            AnsiColor::Named(NamedColor::Red),
+            AnsiColor::Named(NamedColor::Blue),
+            Flags::INVERSE,
+        );
+        assert_eq!(s.fg, Some(Color::Blue));
+        assert_eq!(s.bg, Some(Color::Red));
+    }
 }
