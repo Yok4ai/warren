@@ -1,0 +1,10 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 508 133" width="508" height="133">
+	<defs>
+		<image  width="480" height="85" id="img1" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAeAAAABVAgMAAADsyt90AAAAAXNSR0IB2cksfwAAAAxQTFRF4ODgy8ToCQYTAAAAc3n6mQAAAAR0Uk5T/wAAAG2WYGsAAAC0SURBVHic7dfBEYMgEIXhRxHpJ01IkaQJ+7EIjTPrDJCNEmPiwX8v4BP284AzGvSsTre7rKJdR5V1ZJY09AEYGBgYeAc89LIFwMA/h5MtPCpb3p55DgwMDAz8HzhlY0sGfFG4Pn1RZXnZ0rA1AwYGBgbeD89/b49ifN3c+jBrGTCwewrrE5/cL5Y8ywsYGBgY+Ft4tIk36sN7quZysgB8DXir4Vbzd1le3jpgYGBgYGDg8+EJ5HnnKF4zGQ4AAAAASUVORK5CYII="/>
+		<image  width="476" height="42" id="img2" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAdwAAAAqAQMAAAAj0XgGAAAAAXNSR0IB2cksfwAAAAZQTFRFW1tbW1tbVf76MAAAAAJ0Uk5T/wDltzBKAAAAR0lEQVR4nGNkgIP/DAcdwAzmPxgsxn8MDA8V0NQxMI5qxqEZpJeemsFaRjWPah7VPKqZsOb/UMH/MIWkFICjmkc1j2oeNpoBhdjGOn2j0RwAAAAASUVORK5CYII="/>
+	</defs>
+	<style>
+	</style>
+	<use id="Layer 1" href="#img1" x="13" y="19"/>
+	<use id="Layer 3" style="mix-blend-mode: lighten" href="#img2" x="13" y="62"/>
+</svg>

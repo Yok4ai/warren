@@ -993,8 +993,8 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Min(0),
             ])
             .areas(ba);
-            // Left-to-right greyscale shading (dark grey → near-white), à la opencode — kept grey
-            // regardless of the active theme so the wordmark reads the same everywhere.
+            // Subtle left-to-right neutral-grey gradient ending at the wordmark's light grey
+            // (#e0e0e0, from WARREN.svg) — theme-independent so it reads the same everywhere.
             let total = banner_w.max(1) as f32 - 1.0;
             let banner: Vec<Line> = art
                 .iter()
@@ -1005,9 +1005,9 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                         let glyph = if ch == '#' { "\u{2588}" } else { " " };
                         for _ in 0..scale {
                             let f = (col as f32 / total).clamp(0.0, 1.0);
-                            let style = Style::default()
-                                .fg(shade(Color::Rgb(0x5c, 0x5f, 0x6b), f))
-                                .bold();
+                            // 0x9a (medium grey) → 0xe0 (the wordmark grey).
+                            let v = (0x9a as f32 + (0xe0 - 0x9a) as f32 * f).round() as u8;
+                            let style = Style::default().fg(Color::Rgb(v, v, v)).bold();
                             spans.push(Span::styled(glyph.to_string(), style));
                             col += 1;
                         }
@@ -1405,17 +1405,6 @@ fn draw_markdown_preview(frame: &mut Frame, app: &mut App, content: Rect) {
 }
 
 /// Blend `color` toward white by fraction `f` (0 = unchanged, 1 = white) for banner shading.
-fn shade(color: Color, f: f32) -> Color {
-    let (r, g, b) = match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0x88, 0x88, 0x88),
-    };
-    // Ease toward white but keep the left side clearly tinted.
-    let t = (f * 0.75).clamp(0.0, 1.0);
-    let mix = |c: u8| (c as f32 + (255.0 - c as f32) * t).round() as u8;
-    Color::Rgb(mix(r), mix(g), mix(b))
-}
-
 fn draw_scrollbar(frame: &mut Frame, area: Rect, total: usize, scroll: usize) {
     let track = area.height as usize;
     if track == 0 || total == 0 {
