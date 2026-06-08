@@ -3,6 +3,7 @@
 //! with the previous result. Whole-file re-highlight per keystroke would be far too slow.
 
 use std::path::Path;
+use std::sync::RwLock;
 
 use once_cell::sync::Lazy;
 use ratatui::style::{Color, Modifier, Style};
@@ -14,9 +15,29 @@ use syntect::highlighting::{
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
-static THEME: Lazy<Theme> =
-    Lazy::new(|| ThemeSet::load_defaults().themes["base16-ocean.dark"].clone());
-static HIGHLIGHTER: Lazy<Highlighter<'static>> = Lazy::new(|| Highlighter::new(&THEME));
+static THEMES: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+/// The syntect theme used for code colors. Swapped at runtime to track the warren UI theme
+/// (see `set_syntax_theme`) so cycling the theme recolors code, not just the chrome.
+static ACTIVE: Lazy<RwLock<Theme>> =
+    Lazy::new(|| RwLock::new(THEMES.themes["base16-ocean.dark"].clone()));
+
+/// Point the highlighter at the bundled syntect theme closest to the given warren UI theme.
+/// syntect's defaults don't ship Tokyo Night / Gruvbox / Catppuccin etc., so we map to the
+/// nearest base16 scheme — dark themes get a dark scheme, Light gets a light one. The editor
+/// must re-highlight open buffers afterward (`Editor::rehighlight_all`) for the change to show.
+pub fn set_syntax_theme(warren_name: &str) {
+    let key = match warren_name {
+        "Catppuccin" | "Dracula" => "base16-mocha.dark",
+        "Gruvbox" => "base16-eighties.dark",
+        "Light" => "InspiredGitHub",
+        _ => "base16-ocean.dark", // Tokyo Night / Tokyo Glow / fallback
+    };
+    if let Some(theme) = THEMES.themes.get(key) {
+        if let Ok(mut active) = ACTIVE.write() {
+            *active = theme.clone();
+        }
+    }
+}
 
 /// Parse + highlight state captured *before* a given line.
 pub type LineState = (ParseState, HighlightState);
@@ -31,13 +52,15 @@ pub fn syntax_for(path: &Path) -> &'static SyntaxReference {
 /// Highlight an entire rope from scratch, returning the rendered lines plus the per-line states
 /// (`states[i]` is the state before line `i`; `states.len() == lines.len() + 1`).
 pub fn full(syntax: &SyntaxReference, rope: &Rope) -> (Vec<Line<'static>>, Vec<LineState>) {
+    let active = ACTIVE.read().expect("highlight theme lock poisoned");
+    let hl = Highlighter::new(&active);
     let mut ps = ParseState::new(syntax);
-    let mut hs = HighlightState::new(&HIGHLIGHTER, ScopeStack::new());
+    let mut hs = HighlightState::new(&hl, ScopeStack::new());
     let mut lines = Vec::with_capacity(rope.len_lines());
     let mut states = Vec::with_capacity(rope.len_lines() + 1);
     states.push((ps.clone(), hs.clone()));
     for line in rope.lines() {
-        lines.push(highlight_one(&mut ps, &mut hs, &line.to_string()));
+        lines.push(highlight_one(&mut ps, &mut hs, &line.to_string(), &hl));
         states.push((ps.clone(), hs.clone()));
     }
     if lines.is_empty() {
@@ -64,11 +87,13 @@ pub fn incremental(
         *states = s;
         return;
     }
+    let active = ACTIVE.read().expect("highlight theme lock poisoned");
+    let hl = Highlighter::new(&active);
     let from = from.min(total.saturating_sub(1));
     let (mut ps, mut hs) = states[from].clone();
     let mut i = from;
     while i < total {
-        lines[i] = highlight_one(&mut ps, &mut hs, &rope.line(i).to_string());
+        lines[i] = highlight_one(&mut ps, &mut hs, &rope.line(i).to_string(), &hl);
         let next = (ps.clone(), hs.clone());
         let converged = states[i + 1] == next;
         states[i + 1] = next;
@@ -79,9 +104,14 @@ pub fn incremental(
     }
 }
 
-fn highlight_one(ps: &mut ParseState, hs: &mut HighlightState, line: &str) -> Line<'static> {
+fn highlight_one(
+    ps: &mut ParseState,
+    hs: &mut HighlightState,
+    line: &str,
+    hl: &Highlighter,
+) -> Line<'static> {
     let ops = ps.parse_line(line, &SYNTAXES).unwrap_or_default();
-    let spans: Vec<Span<'static>> = HighlightIterator::new(hs, &ops, line, &HIGHLIGHTER)
+    let spans: Vec<Span<'static>> = HighlightIterator::new(hs, &ops, line, hl)
         .map(|(style, text)| span(style, text))
         .collect();
     if spans.is_empty() {

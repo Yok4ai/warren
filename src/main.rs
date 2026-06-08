@@ -6,8 +6,10 @@ mod editor;
 mod event;
 mod explorer;
 mod find;
+mod fontinstall;
 mod git;
 mod highlight;
+mod icons;
 mod ide;
 mod markdown;
 mod palette;
@@ -26,6 +28,11 @@ use crate::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Power-user helper: install the bundled Nerd Font symbols fallback, then exit (no TUI).
+    if std::env::args().any(|a| a == "--install-font") {
+        return fontinstall::install();
+    }
+
     let config = Config::load();
     let mut terminal = tui::init()?;
     // Detect the terminal's graphics capabilities + cell size for image rendering. Must run after

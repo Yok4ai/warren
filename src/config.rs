@@ -230,6 +230,7 @@ struct SettingsFile {
     theme: Option<String>,
     solid_bg: Option<bool>,
     auto_update: Option<bool>,
+    icons: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -249,6 +250,8 @@ pub struct Config {
     pub solid_bg: bool,
     /// Check GitHub for a newer release on startup and update in place.
     pub auto_update: bool,
+    /// File-explorer icon style (nerd / unicode / none).
+    pub icons: crate::icons::IconStyle,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -283,6 +286,8 @@ help = \"f1\"
 [settings]
 theme = \"Tokyo Night\"
 solid_bg = true
+# File-explorer icons: \"nerd\" (needs a Nerd Font), \"unicode\" (geometric fallback), or \"none\".
+icons = \"nerd\"
 # Check GitHub for a newer release on startup and update warren in place.
 auto_update = true
 ";
@@ -296,15 +301,21 @@ fn state_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("warren").join("state.toml"))
 }
 
-/// Persist the runtime UI choices (theme + solid background). Best-effort.
-pub fn save_state(theme: &str, solid_bg: bool) {
+/// Persist the runtime UI choices (theme + solid background + icon style). Best-effort.
+pub fn save_state(theme: &str, solid_bg: bool, icons: crate::icons::IconStyle) {
     let Some(path) = state_path() else {
         return;
     };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, format!("theme = \"{theme}\"\nsolid_bg = {solid_bg}\n"));
+    let _ = std::fs::write(
+        &path,
+        format!(
+            "theme = \"{theme}\"\nsolid_bg = {solid_bg}\nicons = \"{}\"\n",
+            icons.as_str()
+        ),
+    );
 }
 
 impl Config {
@@ -332,6 +343,7 @@ impl Config {
         config.theme = file.settings.theme;
         config.solid_bg = file.settings.solid_bg.unwrap_or(true);
         config.auto_update = file.settings.auto_update.unwrap_or(true);
+        config.icons = crate::icons::IconStyle::parse(file.settings.icons.as_deref());
 
         // state.toml (written by warren on change) overrides config.toml settings.
         if let Some(sp) = state_path() {
@@ -342,6 +354,9 @@ impl Config {
                     }
                     if let Some(b) = state.solid_bg {
                         config.solid_bg = b;
+                    }
+                    if state.icons.is_some() {
+                        config.icons = crate::icons::IconStyle::parse(state.icons.as_deref());
                     }
                 }
             }

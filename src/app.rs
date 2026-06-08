@@ -1,6 +1,6 @@
 //! Application state and the central run loop.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -129,6 +129,10 @@ pub struct App {
     pub git_branch: String,
     pub git_changes: Vec<Change>,
     pub git_commits: Vec<Commit>,
+    /// Per-file working-tree status (absolute path → M/A/D/U/C), for explorer tinting.
+    pub git_marks: HashMap<PathBuf, char>,
+    /// Directories that (transitively) contain a change, so the tree can mark them too.
+    pub git_dirty_dirs: HashSet<PathBuf>,
     /// Commits whose file list is expanded in the graph.
     pub git_expanded: HashSet<Oid>,
     /// Flattened, currently-visible SCM rows (changes + commits + expanded files).
@@ -285,6 +289,7 @@ impl App {
         if let Some(t) = &config.theme {
             crate::theme::set_by_name(t);
         }
+        crate::highlight::set_syntax_theme(crate::theme::current().name);
         let solid_bg = config.solid_bg;
         let editor = Editor {
             picker,
@@ -303,6 +308,8 @@ impl App {
             git_branch: String::new(),
             git_changes: Vec::new(),
             git_commits: Vec::new(),
+            git_marks: HashMap::new(),
+            git_dirty_dirs: HashSet::new(),
             git_expanded: HashSet::new(),
             scm_items: Vec::new(),
             scm_selected: 0,
@@ -359,7 +366,7 @@ impl App {
                 ..Panel::default()
             },
             term_ratio: 50,
-            panel_strip_w: 10,
+            panel_strip_w: 4,
             resizing_term: false,
             resizing_strip: false,
             panel_divider_col: 0,
@@ -403,6 +410,7 @@ impl App {
         // Check GitHub for a newer release (and auto-apply it if enabled).
         update::spawn_check(tx.clone(), self.config.auto_update);
         self.tx = Some(tx);
+        self.refresh_git_marks(); // seed explorer git tinting before the first paint
 
         // Rendering is driven by the tick only: input/fs events mutate state and mark the UI
         // dirty, and each tick paints at most one frame. This coalesces bursts so holding a key
@@ -445,6 +453,8 @@ impl App {
             }
             if self.sidebar_mode == SidebarMode::SourceControl {
                 self.refresh_git();
+            } else {
+                self.refresh_git_marks();
             }
             self.needs_redraw = true;
         }
@@ -816,7 +826,7 @@ impl App {
                 } else if self.resizing_strip {
                     // Strip grows toward the left as the divider moves left.
                     let w = self.panel_inner_right.saturating_sub(m.column);
-                    self.panel_strip_w = w.clamp(5, 40);
+                    self.panel_strip_w = w.clamp(4, 40);
                 } else if self.dragging_term_sb {
                     self.term_sb_to(m.row);
                 } else if self.term_sel.is_some() {
@@ -996,24 +1006,16 @@ impl App {
         }
     }
 
-    /// Handle a click in the vertical tab strip: select a terminal, close it (✕ at the right
-    /// edge), or add a new one (the "+ new" row below the terminals).
-    fn handle_tablist_click(&mut self, col: u16, row: u16) {
+    /// Handle a left-click in the vertical tab strip: select a terminal, or add a new one (the
+    /// "+" row below the terminals). Closing is via ctrl+x or a middle-click on the row.
+    fn handle_tablist_click(&mut self, _col: u16, row: u16) {
         let strip = self.panel.tablist_area;
         let idx = (row - strip.y) as usize;
         let count = self.panel.terms.len();
         match idx.cmp(&count) {
-            // The "+ new" row, just past the terminals.
+            // The "+" row, just past the terminals.
             std::cmp::Ordering::Equal => self.spawn_terminal(),
-            // A terminal row: the last two columns are the ✕ close button.
-            std::cmp::Ordering::Less => {
-                if col >= strip.x + strip.width.saturating_sub(2) {
-                    self.panel.close(idx);
-                    self.keep_terminal_rail_if_empty();
-                } else {
-                    self.panel.active = idx;
-                }
-            }
+            std::cmp::Ordering::Less => self.panel.active = idx,
             std::cmp::Ordering::Greater => {}
         }
     }
@@ -2073,9 +2075,9 @@ impl App {
         }
     }
 
-    /// Save theme + solid-background to state.toml so they persist across launches.
+    /// Save theme + solid-background + icon style to state.toml so they persist across launches.
     fn persist_ui_state(&self) {
-        crate::config::save_state(crate::theme::current().name, self.solid_bg);
+        crate::config::save_state(crate::theme::current().name, self.solid_bg, self.config.icons);
     }
 
     fn run_command(&mut self, cmd: Command) {
@@ -2129,12 +2131,23 @@ impl App {
                 self.persist_ui_state();
             }
             Command::CycleTheme => {
-                self.status = format!("theme: {}", crate::theme::cycle());
+                let name = crate::theme::cycle();
+                crate::highlight::set_syntax_theme(name);
+                self.editor.rehighlight_all();
+                self.status = format!("theme: {name}");
+                self.persist_ui_state();
+            }
+            Command::CycleIcons => {
+                self.config.icons = self.config.icons.cycle();
+                self.status = format!("icons: {}", self.config.icons.as_str());
                 self.persist_ui_state();
             }
             Command::SetTheme(i) => {
                 crate::theme::set(i);
-                self.status = format!("theme: {}", crate::theme::current().name);
+                let name = crate::theme::current().name;
+                crate::highlight::set_syntax_theme(name);
+                self.editor.rehighlight_all();
+                self.status = format!("theme: {name}");
                 self.persist_ui_state();
             }
             Command::Help => self.show_help = true,
@@ -2520,6 +2533,37 @@ impl App {
             self.git_commits = g.log(100);
         }
         self.rebuild_scm_items();
+        self.refresh_git_marks();
+    }
+
+    /// Recompute the per-file status map used to tint explorer rows. Lighter than `refresh_git`
+    /// (no commit log), so it runs on every fs change regardless of the sidebar mode. Paths are
+    /// canonicalized to match the tree rows (which descend from the canonicalized workspace).
+    fn refresh_git_marks(&mut self) {
+        let Some(workdir) = self.git.as_ref().and_then(|g| g.workdir()) else {
+            self.git_marks.clear();
+            self.git_dirty_dirs.clear();
+            self.git_branch.clear();
+            return;
+        };
+        self.git_branch = self.git.as_ref().map(|g| g.branch()).unwrap_or_default();
+        let changes = self.git.as_ref().map(|g| g.changes()).unwrap_or_default();
+        self.git_marks.clear();
+        self.git_dirty_dirs.clear();
+        for ch in changes {
+            let abs = workdir.join(&ch.path);
+            let abs = abs.canonicalize().unwrap_or(abs);
+            // Mark every ancestor up to (and including) the workspace as containing a change.
+            let mut cur = abs.parent();
+            while let Some(dir) = cur {
+                self.git_dirty_dirs.insert(dir.to_path_buf());
+                if dir == self.workspace {
+                    break;
+                }
+                cur = dir.parent();
+            }
+            self.git_marks.insert(abs, ch.code);
+        }
     }
 
     /// Flatten changes + the (expandable) commit graph into the selectable item list.

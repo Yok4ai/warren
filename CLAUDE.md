@@ -36,11 +36,22 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
   `[settings]` defaults). Runtime UI choices (theme, solid_bg) persist to a separate
   `state.toml` (so config.toml isn't clobbered); state overrides config settings on load.
 - `explorer.rs` — `FileTree`: lazily-expanded dir tree flattened to visible rows; owns its
-  scroll offset so mouse clicks map to rows.
+  scroll offset so mouse clicks map to rows. Rows are tinted by git status (`App::git_marks` /
+  `git_dirty_dirs`, refreshed cheaply on every fs change): changed files take a green/yellow/red
+  name + right-aligned sign, dirs containing changes get a dot.
 - `editor.rs` — `Editor` (tabs) + rope-backed `Buffer` (cursor, edits, selection, save).
   Highlight cache is rebuilt lazily (`refresh_highlight`, once per tick after edits).
-- `highlight.rs` — syntect (fancy-regex, no C deps); `highlight_rope` highlights per rope line
-  so line counts stay aligned with cursor coordinates.
+- `highlight.rs` — syntect (fancy-regex, no C deps); incremental per-line highlight so line
+  counts stay aligned with cursor coordinates. The syntect theme **tracks the UI theme**
+  (`set_syntax_theme` maps each warren theme to the nearest bundled base16 scheme); cycling the
+  theme calls `Editor::rehighlight_all` so open buffers recolor live.
+- `icons.rs` — file-type icons (`IconStyle`: nerd / unicode / none). `nerd` emits Nerd Font
+  devicon glyphs + per-language brand colors (the nvim-web-devicons look) and is the default;
+  `unicode` is the geometric-symbol fallback for non-Nerd-Font terminals. Used by the explorer,
+  editor tabs, and statusline. Persisted like theme; cycle via the palette ("Cycle icons").
+- `fontinstall.rs` — optional `warren --install-font`: drops the embedded `Symbols Nerd Font Mono`
+  (a symbols-only *fallback* font, in `assets/`) into the user font dir + `fc-cache`, so terminals
+  with symbol fallback (kitty/WezTerm/iTerm2/VTE) show the glyphs without changing the primary font.
 - `watcher.rs` — `notify` fs watcher → `AppEvent::FsChanged`; ignores `target/.git/node_modules`.
 - `terminal.rs` — `TerminalPane` (PTY via portable-pty/vt100/tui-term) + `Panel` (multi-terminal).
 - `palette.rs` — fuzzy file finder + command mode (nucleo-matcher).
@@ -90,7 +101,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 · `alt+c` mention active file/selection to Claude · `f1` keybindings overlay.
 Terminal panel: `ctrl+t` new terminal · `ctrl+\`` toggle panel (spawns a shell if empty; run
 `claude`/`npm` in it). In the panel: `ctrl+pageup/pagedown` cycle, `ctrl+x` close, `ctrl+w` leave.
-Vertical tab strip on the right (click to switch, ✕ to close, "+ new" row); both the editor↔panel
+Thin icon-only vertical tab strip on the right (click to switch, middle-click or `ctrl+x` to
+close, "+" row to add); both the editor↔panel
 divider and the content↔strip divider are draggable. Terminal scrollback: 5000 lines; wheel or
 `pageup`/`pagedown` scrolls it for normal-screen apps, alt-screen apps (vim/htop) get the wheel and
 page keys themselves (`alt+pageup`/`alt+pagedown` forces a scroll there); typing snaps to live. Drag selects text (copy-on-release); a plain click forwards

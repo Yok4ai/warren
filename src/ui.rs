@@ -168,20 +168,6 @@ fn collapse_button(frame: &mut Frame, area: Rect, glyph: char, hover: (u16, u16)
     Some(pill_button(frame, area.x + area.width - 4, area.y, glyph, hover))
 }
 
-/// A unicode-safe icon + color for a tree row, by kind/extension.
-fn file_icon(name: &str, is_dir: bool, expanded: bool) -> (&'static str, Color) {
-    if is_dir {
-        return (if expanded { "▾" } else { "▸" }, dark().accent);
-    }
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "md" | "markdown" | "txt" | "rst" => ("◆", dark().fg),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" => ("▣", dark().accent),
-        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" => ("◇", dark().dim),
-        _ => ("●", dark().fg),
-    }
-}
-
 /// Lay out the body: sidebar | editor | terminal as flat columns separated by vertical rules, each
 /// pane respecting its mode (full / collapsed to a rail / hidden). Records per-frame geometry.
 fn layout_body(frame: &mut Frame, app: &mut App, body: Rect) {
@@ -694,6 +680,22 @@ fn border_color(focused: bool) -> Color {
     }
 }
 
+/// Conventional git status colors (theme-independent, like a real VCS gutter).
+const GIT_GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
+const GIT_YELLOW: Color = Color::Rgb(0xe0, 0xaf, 0x68);
+const GIT_RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
+
+/// Map a working-tree status code to a one-char sign + color for explorer rows.
+fn git_mark(code: char) -> (char, Color) {
+    match code {
+        'U' => ('?', GIT_GREEN), // untracked
+        'A' => ('+', GIT_GREEN), // added/staged-new
+        'D' => ('-', GIT_RED),   // deleted
+        'C' => ('!', GIT_RED),   // conflict
+        _ => ('~', GIT_YELLOW),  // modified/renamed/typechange
+    }
+}
+
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_sb = None;
     let focused = app.focus == Focus::Sidebar;
@@ -887,7 +889,17 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
         .take(height)
         .map(|(i, row)| {
             let indent = "  ".repeat(row.depth);
-            let (glyph, icol) = file_icon(&row.name, row.is_dir, row.expanded);
+            let (glyph, icol) =
+                crate::icons::file_icon(&row.name, row.is_dir, row.expanded, app.config.icons);
+            // Git status: a file gets its own status color + sign; a directory containing changes
+            // gets a muted dot. The sign is right-aligned at the pane edge (neo-tree style).
+            let mark = if row.is_dir {
+                app.git_dirty_dirs
+                    .contains(&row.path)
+                    .then_some(('\u{2022}', dark().dim)) // • dot
+            } else {
+                app.git_marks.get(&row.path).map(|&c| git_mark(c))
+            };
             if i == app.tree.selected {
                 // Pad to full width so the selection bar spans the pane.
                 let style = if focused {
@@ -895,19 +907,36 @@ fn draw_explorer(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Style::default().bg(dark().status_bg).fg(dark().fg)
                 };
+                let sign = mark.map(|(s, _)| s);
                 let label = format!("{indent}{glyph} {}", row.name);
-                Line::from(Span::styled(format!("{label:<width$}"), style))
-            } else {
-                let name_style = if row.is_dir {
-                    Style::default().fg(dark().accent).bold()
-                } else {
-                    Style::default().fg(dark().fg)
+                let used = label.chars().count();
+                let line = match sign {
+                    Some(s) if used + 2 <= width => {
+                        format!("{label}{:pad$}{s}", "", pad = width - used - 1)
+                    }
+                    _ => format!("{label:<width$}"),
                 };
-                Line::from(vec![
-                    Span::raw(indent),
+                Line::from(Span::styled(line, style))
+            } else {
+                // A changed file's name takes the status color; otherwise dir=accent, file=fg.
+                let name_style = match (row.is_dir, mark) {
+                    (false, Some((_, c))) => Style::default().fg(c),
+                    (true, _) => Style::default().fg(dark().accent).bold(),
+                    _ => Style::default().fg(dark().fg),
+                };
+                let mut spans = vec![
+                    Span::raw(indent.clone()),
                     Span::styled(format!("{glyph} "), Style::default().fg(icol)),
                     Span::styled(row.name.clone(), name_style),
-                ])
+                ];
+                if let Some((sign, col)) = mark {
+                    let used = indent.chars().count() + 2 + row.name.chars().count();
+                    if used + 2 <= width {
+                        spans.push(Span::raw(" ".repeat(width - used - 1)));
+                        spans.push(Span::styled(sign.to_string(), Style::default().fg(col)));
+                    }
+                }
+                Line::from(spans)
             }
         })
         .collect();
@@ -1003,28 +1032,33 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             meta,
         );
 
-        // Right-align chords into a column, bullet, then bright left-aligned labels.
-        let hint = |chord: String, label: &str| {
+        // LazyVim-style menu: a filetype/action glyph (Nerd Font only), a right-aligned chord
+        // column, a bullet, then a bright label.
+        let nerd = app.config.icons == crate::icons::IconStyle::Nerd;
+        let hint = |icon: &str, chord: String, label: &str| {
+            let ic = if nerd { format!("{icon}  ") } else { String::new() };
             Line::from(vec![
+                Span::styled(ic, Style::default().fg(dark().accent)),
                 Span::styled(format!("{chord:>6}"), Style::default().fg(dark().accent).bold()),
-                Span::styled(format!("  • {label}"), Style::default().fg(Color::White)),
+                Span::styled(format!("  \u{2022} {label}"), Style::default().fg(Color::White)),
             ])
         };
         let hints = Paragraph::new(vec![
-            hint(km.new_file.to_string(), "new file"),
-            hint(km.new_terminal.to_string(), "new terminal"),
-            hint(km.close_tab.to_string(), "close tab / terminal"),
-            hint(km.toggle_panel.to_string(), "toggle terminal panel"),
-            hint(km.toggle_sidebar.to_string(), "toggle sidebar"),
-            hint(km.toggle_editor.to_string(), "toggle editor"),
-            hint(km.toggle_scm.to_string(), "source control"),
-            hint(km.help.to_string(), "all keybindings"),
+            hint("\u{f002}", km.command_palette.to_string(), "find file / commands"),
+            hint("\u{f15b}", km.new_file.to_string(), "new file"),
+            hint("\u{f489}", km.new_terminal.to_string(), "new terminal"),
+            hint("\u{f00d}", km.close_tab.to_string(), "close tab / terminal"),
+            hint("\u{e795}", km.toggle_panel.to_string(), "toggle terminal panel"),
+            hint("\u{f07b}", km.toggle_sidebar.to_string(), "toggle sidebar"),
+            hint("\u{f044}", km.toggle_editor.to_string(), "toggle editor"),
+            hint("\u{e702}", km.toggle_scm.to_string(), "source control"),
+            hint("\u{f11c}", km.help.to_string(), "all keybindings"),
         ]);
 
         // Center the aligned hint block as a fixed-width column.
         let [_, mid, _] = Layout::horizontal([
             Constraint::Min(0),
-            Constraint::Length(32),
+            Constraint::Length(40),
             Constraint::Min(0),
         ])
         .areas(hbot);
@@ -1049,22 +1083,34 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut close_hb = Vec::new();
     let mut x = tabbar.x;
     for (i, name, modified) in &infos {
-        let marker = if *modified { "● " } else { "" };
+        let (glyph, gcol) = crate::icons::file_icon(name, false, false, app.config.icons);
+        let marker = if *modified { "\u{25cf} " } else { "" };
+        // Leading filetype icon (empty in `none` mode), kept in its brand color like bufferline.
+        let icon_seg = if glyph.is_empty() {
+            String::new()
+        } else {
+            format!(" {glyph}")
+        };
         let body = format!(" {marker}{name} ");
+        let iw = icon_seg.chars().count() as u16;
         let bw = body.chars().count() as u16;
+        let span_w = iw + bw;
         let body_style = if *i == active {
             Style::default().fg(dark().accent).bold()
         } else {
             Style::default().fg(dark().dim)
         };
+        if !icon_seg.is_empty() {
+            spans.push(Span::styled(icon_seg, Style::default().fg(gcol)));
+        }
         spans.push(Span::styled(body, body_style));
-        tab_hb.push((x, x + bw, *i));
+        tab_hb.push((x, x + span_w, *i));
 
         let close = "✕ ";
         let cw = close.chars().count() as u16;
         spans.push(Span::styled(close, Style::default().fg(dark().dim)));
-        close_hb.push((x + bw, x + bw + cw, *i));
-        x += bw + cw;
+        close_hb.push((x + span_w, x + span_w + cw, *i));
+        x += span_w + cw;
     }
     app.editor.tab_hitboxes = tab_hb;
     app.editor.close_hitboxes = close_hb;
@@ -1604,41 +1650,46 @@ fn draw_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let active = app.panel.active;
     let blink = app.blink_on;
+    let nerd = app.config.icons == crate::icons::IconStyle::Nerd;
+    let term_glyph = if nerd { "\u{f489}" } else { "\u{25b8}" }; //  terminal icon (▸ fallback)
     let w = strip.width as usize;
-    let avail = w.saturating_sub(2);
+    // Thin, icon-only rows: [marker 1][icon 1][fill]. No close button — close via ctrl+x or a
+    // middle-click on the row. The active row is a soft highlight bar (theme selection bg + edge).
+    let fill = w.saturating_sub(2);
     let mut lines: Vec<Line> = app
         .panel
         .terms
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            // Status dot: the active tab pulses while its child is producing output ("working").
-            let dot = if i == active && working {
-                if blink { "●" } else { "○" }
-            } else if i == active {
-                "▸"
+        .map(|(i, _t)| {
+            let is_active = i == active;
+            // Left marker: a thin accent bar when active; pulses to a dot while the child works.
+            let marker = if is_active && working {
+                if blink { "\u{25cf}" } else { "\u{25cb}" } // ● / ○
+            } else if is_active {
+                "\u{258e}" // ▎ thin bar
             } else {
                 " "
             };
-            let label: String = format!("{dot} {}", t.name).chars().take(avail).collect();
-            let (name_style, x_style) = if i == active {
-                let s = Style::default().bg(dark().accent).fg(Color::Black);
-                (s, s)
+            let row_bg = if is_active {
+                Style::default().bg(dark().sel_bg)
             } else {
-                (
-                    Style::default().fg(dark().fg),
-                    Style::default().fg(dark().dim),
-                )
+                Style::default()
             };
+            let icon_fg = if is_active { dark().accent } else { dark().fg };
             Line::from(vec![
-                Span::styled(format!("{label:<avail$}"), name_style),
-                Span::styled("✕ ", x_style),
+                Span::styled(marker, row_bg.fg(dark().accent)),
+                Span::styled(term_glyph, row_bg.fg(icon_fg)),
+                Span::styled(" ".repeat(fill), row_bg),
             ])
         })
         .collect();
+    // A muted "+" affordance directly below the terminals (kept at row == terms.len() so the
+    // click-row mapping in `handle_tablist_click` stays correct).
+    let plus = if nerd { "\u{f067}" } else { "+" }; //  plus icon
     lines.push(Line::from(Span::styled(
-        format!("{:<w$}", " + new"),
-        Style::default().fg(dark().accent),
+        format!(" {plus}"),
+        Style::default().fg(dark().dim),
     )));
     frame.render_widget(Paragraph::new(lines), strip);
 
@@ -1695,10 +1746,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Focus::Editor => "EDITOR",
         Focus::Terminal => "CLAUDE",
     };
+    let nerd = app.config.icons == crate::icons::IconStyle::Nerd;
     let mut left_spans = vec![
         Span::styled(format!(" {focus} "), bg.fg(dark().accent).bold()),
-        Span::styled(format!("{} ", app.status), bg),
     ];
+    // Branch segment (lualine-style): a git-branch glyph + name when in a repo.
+    if !app.git_branch.is_empty() {
+        let icon = if nerd { "\u{e0a0} " } else { "" };
+        left_spans.push(Span::styled(format!(" {icon}{} ", app.git_branch), bg.fg(dark().dim)));
+    }
+    left_spans.push(Span::styled(format!(" {} ", app.status), bg));
     // A spinner while a terminal child is producing output ("working").
     if app.term_working() {
         left_spans.push(Span::styled(
@@ -1707,10 +1764,25 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     let left = Line::from(left_spans);
-    let right = Line::from(Span::styled(
-        format!(" {} help · {} sidebar · {} quit ", km.help, km.toggle_sidebar, km.quit),
-        bg,
-    ));
+
+    // Right segment: active file's type icon + name, cursor location, and progress through the file.
+    let right = if let Some(b) = app.editor.active_buffer() {
+        let (glyph, col) = crate::icons::file_icon(&b.name, false, false, app.config.icons);
+        let (line, ch) = b.cursor;
+        let total = b.line_count();
+        let pct = if total <= 1 { 100 } else { line * 100 / (total - 1) };
+        Line::from(vec![
+            Span::styled(format!(" {glyph} "), bg.fg(col)),
+            Span::styled(format!("{}  ", b.name), bg),
+            Span::styled(format!("Ln {}, Col {}  ", line + 1, ch + 1), bg.fg(dark().dim)),
+            Span::styled(format!("{pct}% "), bg.fg(dark().dim)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            format!(" {} help · {} sidebar · {} quit ", km.help, km.toggle_sidebar, km.quit),
+            bg,
+        ))
+    };
 
     let [l, r] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right.width() as u16)])

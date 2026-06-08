@@ -873,6 +873,20 @@ impl Editor {
         }
     }
 
+    /// Force a full re-highlight of every code buffer — used after a syntax-theme change so the
+    /// already-rendered lines pick up the new colors. Diff buffers keep their own coloring.
+    pub fn rehighlight_all(&mut self) {
+        for b in &mut self.tabs {
+            if b.is_diff {
+                continue;
+            }
+            let (lines, states) = highlight::full(b.syntax, &b.rope);
+            b.lines = lines;
+            b.hl_states = states;
+            b.dirty_from = None;
+        }
+    }
+
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();

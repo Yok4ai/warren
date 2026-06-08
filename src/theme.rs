@@ -122,9 +122,29 @@ pub const TOKYO_GLOW: Theme = Theme {
     diff_del_fg: rgb(0xff, 0x9e, 0x9e),
 };
 
+/// Monochrome — shades of black/grey/white, à la opencode. No chromatic accent; the "accent"
+/// (used for selection bars, dir names, active tabs) is a near-white, so highlights read as a
+/// light bar rather than a color. Diff add/del stay faintly green/red so changes remain legible.
+pub const MONOCHROME: Theme = Theme {
+    name: "Monochrome",
+    bg: rgb(0x0f, 0x0f, 0x13),
+    accent: rgb(0xc5, 0xc8, 0xd2),
+    fg: rgb(0xcd, 0xd0, 0xd8),
+    dim: rgb(0x5c, 0x5f, 0x6b),
+    border: rgb(0x26, 0x27, 0x2e),
+    status_bg: rgb(0x16, 0x16, 0x1b),
+    status_fg: rgb(0x9a, 0x9e, 0xa8),
+    sel_bg: rgb(0x2b, 0x2c, 0x34),
+    diff_add_bg: rgb(0x1f, 0x2a, 0x22),
+    diff_del_bg: rgb(0x2e, 0x20, 0x22),
+    diff_add_fg: rgb(0x9d, 0xb5, 0x9d),
+    diff_del_fg: rgb(0xc6, 0x9a, 0x9a),
+};
+
 pub static THEMES: &[&Theme] = &[
     &TOKYO_NIGHT,
     &TOKYO_GLOW,
+    &MONOCHROME,
     &CATPPUCCIN,
     &DRACULA,
     &GRUVBOX,

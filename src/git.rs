@@ -1,7 +1,7 @@
 //! Git integration via `git2` (libgit2). Local operations only — status, log, diffs, staging,
 //! and committing. Network operations (push/pull) need TLS and are deferred.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -32,6 +32,11 @@ impl Git {
     /// Open the repository containing `root`, if any.
     pub fn open(root: &Path) -> Option<Self> {
         Repository::discover(root).ok().map(|repo| Self { repo })
+    }
+
+    /// The working-tree root (paths from `changes()` are relative to this, not the workspace).
+    pub fn workdir(&self) -> Option<PathBuf> {
+        self.repo.workdir().map(Path::to_path_buf)
     }
 
     pub fn branch(&self) -> String {
