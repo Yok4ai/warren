@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ropey::Rope;
 use syntect::highlighting::{
     Color as SynColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
-    Style as SynStyle, Theme, ThemeSet,
+    ScopeSelectors, Style as SynStyle, StyleModifier, Theme, ThemeItem, ThemeSettings, ThemeSet,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
@@ -45,13 +45,12 @@ static EXTRA: Lazy<ThemeSet> = Lazy::new(|| {
             ts.themes.insert(name.to_string(), t);
         }
     }
-    // Monochrome syntax variants: desaturate a well-structured theme (Tokyo Night) to greyscale at
-    // a few contrast levels, so code stays black/grey/white but token roles are still legible.
-    if let Some(base) = ts.themes.get("Tokyo Night").cloned() {
-        ts.themes.insert("Mono".into(), desaturate(&base, 1.0));
-        ts.themes.insert("Mono Soft".into(), desaturate(&base, 0.55));
-        ts.themes.insert("Mono Bold".into(), desaturate(&base, 1.6));
-    }
+    // Monochrome syntax variants — built from scratch (desaturating a real theme collapses tokens
+    // to one grey, since hues differ but luminance doesn't). Token roles get distinct grey levels
+    // plus bold/italic, so structure reads without color.
+    ts.themes.insert("Mono".into(), mono_theme("Mono", 56, true));
+    ts.themes.insert("Mono Soft".into(), mono_theme("Mono Soft", 30, false));
+    ts.themes.insert("Mono Bold".into(), mono_theme("Mono Bold", 74, true));
     if let Some(dir) = dirs::config_dir().map(|d| d.join("warren").join("themes")) {
         let _ = std::fs::create_dir_all(&dir); // so the folder exists for the user to drop themes in
         let _ = ts.add_from_folder(&dir); // best-effort; each theme keyed by its own `name`
@@ -85,27 +84,56 @@ static EMBEDDED: &[(&str, EmbeddedThemeName)] = {
     ]
 };
 
-/// Map a syntect color to greyscale by luminance, with a contrast factor about mid-grey. Kept
-/// inside a readable band so the darkest tokens don't vanish on a dark background.
-fn grey(c: SynColor, contrast: f32) -> SynColor {
-    let lum = 0.299 * c.r as f32 + 0.587 * c.g as f32 + 0.114 * c.b as f32;
-    let v = (128.0 + (lum - 128.0) * contrast).clamp(96.0, 235.0).round() as u8;
-    SynColor { r: v, g: v, b: v, a: c.a }
-}
-
-/// Greyscale copy of a theme: only foreground colors are remapped (backgrounds are unused — the
-/// terminal shows through), so token roles read as shades of grey.
-fn desaturate(theme: &Theme, contrast: f32) -> Theme {
-    let mut t = theme.clone();
-    if let Some(fg) = t.settings.foreground {
-        t.settings.foreground = Some(grey(fg, contrast));
+/// Build a greyscale theme by role: each token category gets a grey level offset from a mid-grey
+/// (`spread` controls how far bright/dim diverge) plus bold/italic emphasis (when `emphasize`),
+/// so structure reads without any color. `(scope, offset, font_style)` — more-specific scopes win.
+fn mono_theme(name: &str, spread: i32, emphasize: bool) -> Theme {
+    const MID: i32 = 176;
+    let g = |off: i32| {
+        let v = (MID + off).clamp(72, 245) as u8;
+        SynColor { r: v, g: v, b: v, a: 255 }
+    };
+    let bold = emphasize.then_some(FontStyle::BOLD);
+    let rules: &[(&str, i32, Option<FontStyle>)] = &[
+        ("comment", -spread, Some(FontStyle::ITALIC)),
+        ("punctuation", -spread * 3 / 4, None),
+        ("keyword.operator", -spread / 2, None),
+        ("variable", 0, None),
+        ("string", spread / 2, None),
+        ("constant", spread * 3 / 4, None),
+        ("constant.numeric", spread * 3 / 4, None),
+        ("constant.language", spread * 3 / 4, bold),
+        ("entity.name.function", spread, None),
+        ("support.function", spread, None),
+        ("entity.name.type", spread, bold),
+        ("support.type", spread, bold),
+        ("storage.type", spread, bold),
+        ("entity.name.tag", spread, None),
+        ("keyword", spread, bold),
+        ("storage", spread, bold),
+    ];
+    let scopes = rules
+        .iter()
+        .filter_map(|(sc, off, fs)| {
+            Some(ThemeItem {
+                scope: sc.parse::<ScopeSelectors>().ok()?,
+                style: StyleModifier {
+                    foreground: Some(g(*off)),
+                    background: None,
+                    font_style: *fs,
+                },
+            })
+        })
+        .collect();
+    Theme {
+        name: Some(name.to_string()),
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(g(0)),
+            ..ThemeSettings::default()
+        },
+        scopes,
     }
-    for item in &mut t.scopes {
-        if let Some(fg) = item.style.foreground {
-            item.style.foreground = Some(grey(fg, contrast));
-        }
-    }
-    t
 }
 
 /// All selectable syntax-theme names (bundled + monochrome + user-installed + embedded), in a
