@@ -1,1 +1,6 @@
 /target
+assets/examples
+.DS_Store
+__MACOSX/
+assets/OpenCode Brand Assets/
+PLAN-icons-themes-ui.md
