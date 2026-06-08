@@ -901,8 +901,9 @@ impl App {
                     if self.dragging {
                         self.handle_drop(&path, m.column, m.row);
                     } else {
-                        // No movement: treat as a click (open file / toggle folder).
-                        self.activate_selected();
+                        // No movement: treat as a click (open file / toggle folder). Keep focus
+                        // on the explorer — opening a file shouldn't grab the editor cursor.
+                        self.activate_selected(false);
                     }
                     self.dragging = false;
                 } else if self.dragging_scrollbar {
@@ -1214,14 +1215,18 @@ impl App {
         }
     }
 
-    /// Open the selected file, or expand/collapse the selected directory (shared by the
-    /// Enter key and mouse clicks).
-    fn activate_selected(&mut self) {
+    /// Open the selected file, or expand/collapse the selected directory (shared by the Enter key
+    /// and mouse clicks). `focus_editor` moves focus to the editor on open — true for Enter (the
+    /// user is driving from the keyboard), false for a mouse click (just open it; the user can
+    /// click into the editor to move focus there).
+    fn activate_selected(&mut self, focus_editor: bool) {
         if let Some(path) = self.tree.activate() {
             match self.editor.open(&path) {
                 Ok(()) => {
                     self.editor_visible = true; // opening a file reveals a hidden editor
-                    self.focus = Focus::Editor;
+                    if focus_editor {
+                        self.focus = Focus::Editor;
+                    }
                     self.status = path.display().to_string();
                 }
                 Err(e) => self.status = format!("error: {e}"),
@@ -2465,7 +2470,7 @@ impl App {
                     KeyCode::Down => self.tree.move_down(),
                     KeyCode::Right => self.tree.expand(),
                     KeyCode::Left => self.tree.collapse(),
-                    KeyCode::Enter => self.activate_selected(),
+                    KeyCode::Enter => self.activate_selected(true),
                     // File operations: F2 rename · Del delete · ctrl+c/x/v copy/cut/paste · n new folder.
                     KeyCode::F(2) => {
                         if let Some(p) = sel {
