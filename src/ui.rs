@@ -958,26 +958,34 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         // The welcome screen has no tab bar, so place the collapse button at the top-right itself.
         app.editor_collapse_hit = collapse_button(frame, inner, '‹', app.hover);
 
-        // Block-letter banner shown when no file is open (à la opencode's logo).
-        const BANNER: [&str; 5] = [
-            "██     ██  █████  ██████  ██████  ███████ ███    ██",
-            "██     ██ ██   ██ ██   ██ ██   ██ ██      ████   ██",
-            "██  █  ██ ███████ ██████  ██████  █████   ██ ██  ██",
-            "██ ███ ██ ██   ██ ██   ██ ██   ██ ██      ██  ██ ██",
-            " ███ ███  ██   ██ ██   ██ ██   ██ ███████ ██   ████",
-        ];
-        let banner_w = BANNER.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+        // "WARREN" in opencode's pixel font. `E` and `N` are the genuine opencode glyphs (extracted
+        // from their open-source wordmark SVG, a 4×5 grid); `W`/`A`/`R` are drawn to match the same
+        // grid + stroke weight. `#` = filled, `.` = blank. Rendered at 2× width so the pixels read
+        // square (terminal cells are ~1:2), dropping to 1× then a plain word as the pane narrows.
+        const W: [&str; 5] = ["#...#", "#...#", "#.#.#", "#.#.#", ".#.#."];
+        const A: [&str; 5] = ["####", "#..#", "####", "#..#", "#..#"];
+        const R: [&str; 5] = ["####", "#..#", "####", "#.#.", "#..#"];
+        const E: [&str; 5] = ["####", "#..#", "####", "#...", "####"];
+        const N: [&str; 5] = ["###.", "#..#", "#..#", "#..#", "#..#"];
+        let letters = [W, A, R, R, E, N];
+        let art: Vec<String> = (0..5)
+            .map(|row| letters.iter().map(|l| l[row]).collect::<Vec<_>>().join(" "))
+            .collect();
+        let cells = art.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+        // Largest integer scale that fits (2× gives square pixels), else 1×.
+        let scale: u16 = if inner.width >= cells * 2 { 2 } else { 1 };
+        let banner_w = cells * scale;
 
         let [_, ba, meta, hbot] = Layout::vertical([
             Constraint::Length(2),
-            Constraint::Length(BANNER.len() as u16),
+            Constraint::Length(art.len() as u16),
             Constraint::Length(4),
             Constraint::Min(0),
         ])
         .areas(inner);
 
         // Center the banner as a fixed-width block so the art stays aligned (fall back to a plain
-        // word if the pane is too narrow).
+        // word if the pane is too narrow even at 1×).
         if inner.width >= banner_w {
             let [_, bm, _] = Layout::horizontal([
                 Constraint::Min(0),
@@ -985,22 +993,25 @@ fn draw_editor(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Min(0),
             ])
             .areas(ba);
-            // Left-to-right shading across the block letters (accent → near-white), à la opencode.
-            let w = banner_w.max(1) as f32 - 1.0;
-            let banner: Vec<Line> = BANNER
+            // Left-to-right greyscale shading (dark grey → near-white), à la opencode — kept grey
+            // regardless of the active theme so the wordmark reads the same everywhere.
+            let total = banner_w.max(1) as f32 - 1.0;
+            let banner: Vec<Line> = art
                 .iter()
                 .map(|l| {
-                    let spans: Vec<Span> = l
-                        .chars()
-                        .enumerate()
-                        .map(|(i, ch)| {
-                            let f = (i as f32 / w).clamp(0.0, 1.0);
-                            Span::styled(
-                                ch.to_string(),
-                                Style::default().fg(shade(dark().accent, f)).bold(),
-                            )
-                        })
-                        .collect();
+                    let mut spans = Vec::with_capacity(banner_w as usize);
+                    let mut col = 0u16;
+                    for ch in l.chars() {
+                        let glyph = if ch == '#' { "\u{2588}" } else { " " };
+                        for _ in 0..scale {
+                            let f = (col as f32 / total).clamp(0.0, 1.0);
+                            let style = Style::default()
+                                .fg(shade(Color::Rgb(0x5c, 0x5f, 0x6b), f))
+                                .bold();
+                            spans.push(Span::styled(glyph.to_string(), style));
+                            col += 1;
+                        }
+                    }
                     Line::from(spans)
                 })
                 .collect();
