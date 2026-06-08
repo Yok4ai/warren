@@ -11,7 +11,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ropey::Rope;
 use syntect::highlighting::{
-    FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle, Theme, ThemeSet,
+    Color as SynColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+    Style as SynStyle, Theme, ThemeSet,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
@@ -44,12 +45,114 @@ static EXTRA: Lazy<ThemeSet> = Lazy::new(|| {
             ts.themes.insert(name.to_string(), t);
         }
     }
+    // Monochrome syntax variants: desaturate a well-structured theme (Tokyo Night) to greyscale at
+    // a few contrast levels, so code stays black/grey/white but token roles are still legible.
+    if let Some(base) = ts.themes.get("Tokyo Night").cloned() {
+        ts.themes.insert("Mono".into(), desaturate(&base, 1.0));
+        ts.themes.insert("Mono Soft".into(), desaturate(&base, 0.55));
+        ts.themes.insert("Mono Bold".into(), desaturate(&base, 1.6));
+    }
     if let Some(dir) = dirs::config_dir().map(|d| d.join("warren").join("themes")) {
         let _ = std::fs::create_dir_all(&dir); // so the folder exists for the user to drop themes in
         let _ = ts.add_from_folder(&dir); // best-effort; each theme keyed by its own `name`
     }
     ts
 });
+
+/// Curated display name → two-face embedded theme, for the gallery and `set_named`.
+static EMBEDDED: &[(&str, EmbeddedThemeName)] = {
+    use EmbeddedThemeName as T;
+    &[
+        ("Dracula", T::Dracula),
+        ("Nord", T::Nord),
+        ("One Dark", T::TwoDark),
+        ("One Half Dark", T::OneHalfDark),
+        ("One Half Light", T::OneHalfLight),
+        ("Catppuccin Mocha", T::CatppuccinMocha),
+        ("Catppuccin Macchiato", T::CatppuccinMacchiato),
+        ("Catppuccin Frappé", T::CatppuccinFrappe),
+        ("Catppuccin Latte", T::CatppuccinLatte),
+        ("Gruvbox Dark", T::GruvboxDark),
+        ("Gruvbox Light", T::GruvboxLight),
+        ("Monokai Extended", T::MonokaiExtended),
+        ("Solarized Dark", T::SolarizedDark),
+        ("Solarized Light", T::SolarizedLight),
+        ("Zenburn", T::Zenburn),
+        ("Sublime Snazzy", T::SublimeSnazzy),
+        ("Dark Neon", T::DarkNeon),
+        ("Coldark Dark", T::ColdarkDark),
+        ("GitHub", T::Github),
+    ]
+};
+
+/// Map a syntect color to greyscale by luminance, with a contrast factor about mid-grey. Kept
+/// inside a readable band so the darkest tokens don't vanish on a dark background.
+fn grey(c: SynColor, contrast: f32) -> SynColor {
+    let lum = 0.299 * c.r as f32 + 0.587 * c.g as f32 + 0.114 * c.b as f32;
+    let v = (128.0 + (lum - 128.0) * contrast).clamp(96.0, 235.0).round() as u8;
+    SynColor { r: v, g: v, b: v, a: c.a }
+}
+
+/// Greyscale copy of a theme: only foreground colors are remapped (backgrounds are unused — the
+/// terminal shows through), so token roles read as shades of grey.
+fn desaturate(theme: &Theme, contrast: f32) -> Theme {
+    let mut t = theme.clone();
+    if let Some(fg) = t.settings.foreground {
+        t.settings.foreground = Some(grey(fg, contrast));
+    }
+    for item in &mut t.scopes {
+        if let Some(fg) = item.style.foreground {
+            item.style.foreground = Some(grey(fg, contrast));
+        }
+    }
+    t
+}
+
+/// All selectable syntax-theme names (bundled + monochrome + user-installed + embedded), in a
+/// stable order so the gallery's indices are consistent within a session.
+pub fn theme_names() -> Vec<String> {
+    let curated = [
+        "Tokyo Night", "Tokyo Storm", "Tokyo Moon", "Tokyo Day", "Mono", "Mono Soft", "Mono Bold",
+    ];
+    let mut out: Vec<String> = curated
+        .iter()
+        .filter(|n| EXTRA.themes.contains_key(**n))
+        .map(|n| n.to_string())
+        .collect();
+    // User-installed themes (anything in EXTRA not in the curated list), sorted.
+    let mut user: Vec<String> = EXTRA
+        .themes
+        .keys()
+        .filter(|k| !curated.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    user.sort();
+    out.extend(user);
+    out.extend(EMBEDDED.iter().map(|(n, _)| n.to_string()));
+    out
+}
+
+/// Look up a theme by gallery name (bundled/user first, then embedded).
+fn resolve(name: &str) -> Option<Theme> {
+    if let Some(t) = EXTRA.themes.get(name) {
+        return Some(t.clone());
+    }
+    EMBEDDED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, e)| THEMES.get(*e).clone())
+}
+
+/// Set the active syntax theme by gallery name; returns whether it matched.
+pub fn set_named(name: &str) -> bool {
+    if let Some(theme) = resolve(name) {
+        if let Ok(mut active) = ACTIVE.write() {
+            *active = theme;
+            return true;
+        }
+    }
+    false
+}
 
 /// The syntect theme used for code colors. Swapped at runtime to track the warren UI theme
 /// (see `set_syntax_theme`) so cycling the theme recolors code, not just the chrome.
@@ -60,7 +163,7 @@ fn embedded_for(warren_name: &str) -> EmbeddedThemeName {
     use EmbeddedThemeName as T;
     match warren_name {
         "Catppuccin" => T::CatppuccinMocha,
-        "Dracula" => T::Dracula,
+        "Dracula" | "Dracula Dark" => T::Dracula,
         "Gruvbox" => T::GruvboxDark,
         "Monochrome" => T::Zenburn,
         _ => T::TwoDark,
@@ -73,6 +176,8 @@ fn theme_for(warren_name: &str) -> Theme {
     let mapped = match warren_name {
         "Tokyo Night" => "Tokyo Night",
         "Tokyo Glow" => "Tokyo Storm",
+        "Tokyo Glow Dark" => "Tokyo Night",
+        "Monochrome" => "Mono",
         "Light" => "Tokyo Day",
         _ => warren_name,
     };

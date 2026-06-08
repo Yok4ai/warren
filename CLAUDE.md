@@ -47,7 +47,11 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
   (`set_syntax_theme`/`theme_for`: prefer a bundled/user tmTheme by name, else two-face's closest
   `EmbeddedThemeName`). Real **Tokyo Night** variants (folke's sublime exports) are bundled in
   `assets/themes/`; users can install any `.tmTheme` by dropping it in `~/.config/warren/themes/`.
-  Cycling the theme calls `Editor::rehighlight_all` so open buffers recolor live.
+  Cycling the theme calls `Editor::rehighlight_all` so open buffers recolor live. The **syntax
+  theme is decoupled** from the UI theme: a gallery (palette → "Syntax: …", with live preview as
+  you arrow through; "Syntax: follow UI theme" resets) lets you pick any of ~40 themes —
+  `theme_names()`/`set_named()` — persisted as `syntax_theme` in state.toml. Includes generated
+  greyscale **Mono / Mono Soft / Mono Bold** variants (`desaturate`).
 - `icons.rs` — file-type icons (`IconStyle`: nerd / unicode / none). `nerd` emits Nerd Font
   devicon glyphs + per-language brand colors (the nvim-web-devicons look) and is the default;
   `unicode` is the geometric-symbol fallback for non-Nerd-Font terminals. Used by the explorer,

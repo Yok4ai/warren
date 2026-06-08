@@ -24,6 +24,10 @@ pub enum Command {
     CycleIcons,
     Update,
     SetTheme(usize),
+    /// Pick a syntax (code-coloring) theme by index into `crate::highlight::theme_names()`.
+    SetSyntaxTheme(usize),
+    /// Revert the syntax theme to follow the UI theme.
+    SyntaxThemeFollowUi,
     Help,
     Quit,
 }
@@ -54,6 +58,11 @@ pub fn commands() -> Vec<(String, Command)> {
     .collect();
     for (i, t) in crate::theme::THEMES.iter().enumerate() {
         v.push((format!("Theme: {}", t.name), SetTheme(i)));
+    }
+    // Syntax-theme gallery: one entry per available code-coloring theme, plus a "follow UI" reset.
+    v.push(("Syntax: follow UI theme".to_string(), SyntaxThemeFollowUi));
+    for (i, name) in crate::highlight::theme_names().into_iter().enumerate() {
+        v.push((format!("Syntax: {name}"), SetSyntaxTheme(i)));
     }
     v
 }

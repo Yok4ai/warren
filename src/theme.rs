@@ -106,6 +106,23 @@ pub const DRACULA: Theme = Theme {
     diff_del_fg: rgb(0xff, 0x55, 0x55),
 };
 
+/// A deeper Dracula — same purple accent on a darker, dimmer background.
+pub const DRACULA_DARK: Theme = Theme {
+    name: "Dracula Dark",
+    bg: rgb(0x1a, 0x1b, 0x22),
+    accent: rgb(0xbd, 0x93, 0xf9),
+    fg: rgb(0xe6, 0xe6, 0xe0),
+    dim: rgb(0x55, 0x5d, 0x82),
+    border: rgb(0x32, 0x35, 0x44),
+    status_bg: rgb(0x14, 0x15, 0x1a),
+    status_fg: rgb(0xe6, 0xe6, 0xe0),
+    sel_bg: rgb(0x34, 0x37, 0x48),
+    diff_add_bg: rgb(0x18, 0x30, 0x22),
+    diff_del_bg: rgb(0x30, 0x1a, 0x22),
+    diff_add_fg: rgb(0x50, 0xfa, 0x7b),
+    diff_del_fg: rgb(0xff, 0x55, 0x55),
+};
+
 pub const TOKYO_GLOW: Theme = Theme {
     name: "Tokyo Glow",
     bg: rgb(0x16, 0x16, 0x1e),
@@ -118,6 +135,23 @@ pub const TOKYO_GLOW: Theme = Theme {
     sel_bg: rgb(0x2a, 0x3f, 0x76),
     diff_add_bg: rgb(0x1d, 0x35, 0x28),
     diff_del_bg: rgb(0x3a, 0x22, 0x28),
+    diff_add_fg: rgb(0xb9, 0xf2, 0x7c),
+    diff_del_fg: rgb(0xff, 0x9e, 0x9e),
+};
+
+/// A near-black Tokyo Glow — same cyan accent, deeper background/chrome.
+pub const TOKYO_GLOW_DARK: Theme = Theme {
+    name: "Tokyo Glow Dark",
+    bg: rgb(0x0b, 0x0b, 0x10),
+    accent: rgb(0x7d, 0xcf, 0xff),
+    fg: rgb(0xb6, 0xc0, 0xea),
+    dim: rgb(0x45, 0x4d, 0x70),
+    border: rgb(0x1c, 0x26, 0x42),
+    status_bg: rgb(0x0e, 0x0e, 0x15),
+    status_fg: rgb(0x98, 0xa0, 0xc4),
+    sel_bg: rgb(0x1f, 0x2f, 0x5c),
+    diff_add_bg: rgb(0x16, 0x2a, 0x1f),
+    diff_del_bg: rgb(0x2e, 0x1a, 0x20),
     diff_add_fg: rgb(0xb9, 0xf2, 0x7c),
     diff_del_fg: rgb(0xff, 0x9e, 0x9e),
 };
@@ -144,9 +178,11 @@ pub const MONOCHROME: Theme = Theme {
 pub static THEMES: &[&Theme] = &[
     &TOKYO_NIGHT,
     &TOKYO_GLOW,
+    &TOKYO_GLOW_DARK,
     &MONOCHROME,
     &CATPPUCCIN,
     &DRACULA,
+    &DRACULA_DARK,
     &GRUVBOX,
     &LIGHT,
 ];

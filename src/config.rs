@@ -231,6 +231,8 @@ struct SettingsFile {
     solid_bg: Option<bool>,
     auto_update: Option<bool>,
     icons: Option<String>,
+    /// Syntax (code-coloring) theme, chosen in the gallery; absent = follow the UI theme.
+    syntax_theme: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -252,6 +254,8 @@ pub struct Config {
     pub auto_update: bool,
     /// File-explorer icon style (nerd / unicode / none).
     pub icons: crate::icons::IconStyle,
+    /// Syntax theme override from the gallery; `None` = follow the UI theme.
+    pub syntax_theme: Option<String>,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -301,21 +305,28 @@ fn state_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("warren").join("state.toml"))
 }
 
-/// Persist the runtime UI choices (theme + solid background + icon style). Best-effort.
-pub fn save_state(theme: &str, solid_bg: bool, icons: crate::icons::IconStyle) {
+/// Persist the runtime UI choices (theme + solid background + icon style + syntax theme).
+/// Best-effort.
+pub fn save_state(
+    theme: &str,
+    solid_bg: bool,
+    icons: crate::icons::IconStyle,
+    syntax_theme: Option<&str>,
+) {
     let Some(path) = state_path() else {
         return;
     };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(
-        &path,
-        format!(
-            "theme = \"{theme}\"\nsolid_bg = {solid_bg}\nicons = \"{}\"\n",
-            icons.as_str()
-        ),
+    let mut out = format!(
+        "theme = \"{theme}\"\nsolid_bg = {solid_bg}\nicons = \"{}\"\n",
+        icons.as_str()
     );
+    if let Some(st) = syntax_theme {
+        out.push_str(&format!("syntax_theme = \"{st}\"\n"));
+    }
+    let _ = std::fs::write(&path, out);
 }
 
 impl Config {
@@ -344,6 +355,7 @@ impl Config {
         config.solid_bg = file.settings.solid_bg.unwrap_or(true);
         config.auto_update = file.settings.auto_update.unwrap_or(true);
         config.icons = crate::icons::IconStyle::parse(file.settings.icons.as_deref());
+        config.syntax_theme = file.settings.syntax_theme;
 
         // state.toml (written by warren on change) overrides config.toml settings.
         if let Some(sp) = state_path() {
@@ -357,6 +369,9 @@ impl Config {
                     }
                     if state.icons.is_some() {
                         config.icons = crate::icons::IconStyle::parse(state.icons.as_deref());
+                    }
+                    if state.syntax_theme.is_some() {
+                        config.syntax_theme = state.syntax_theme;
                     }
                 }
             }

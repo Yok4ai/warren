@@ -205,6 +205,10 @@ pub struct App {
     pub close_confirm: Option<usize>,
     /// The command palette / fuzzy finder, when open.
     pub palette: Option<Palette>,
+    /// Syntax-theme override (gallery selection); `None` follows the UI theme.
+    syntax_theme: Option<String>,
+    /// True while the palette is live-previewing a syntax theme (restore on cancel).
+    syntax_previewing: bool,
     /// In-editor find, when open.
     pub search: Option<Search>,
     /// Whether the keybinding help overlay is shown.
@@ -289,7 +293,15 @@ impl App {
         if let Some(t) = &config.theme {
             crate::theme::set_by_name(t);
         }
-        crate::highlight::set_syntax_theme(crate::theme::current().name);
+        // Syntax theme: a saved gallery override, else follow the UI theme.
+        let syntax_theme = config.syntax_theme.clone();
+        let applied = syntax_theme
+            .as_deref()
+            .map(crate::highlight::set_named)
+            .unwrap_or(false);
+        if !applied {
+            crate::highlight::set_syntax_theme(crate::theme::current().name);
+        }
         let solid_bg = config.solid_bg;
         let editor = Editor {
             picker,
@@ -301,6 +313,8 @@ impl App {
             tree,
             editor,
             focus: Focus::Sidebar,
+            syntax_theme,
+            syntax_previewing: false,
             sidebar_visible: true,
             sidebar_mode: SidebarMode::Explorer,
             editor_visible: true,
@@ -2029,10 +2043,22 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => self.palette = None,
+            KeyCode::Esc => {
+                // Cancel: undo any live syntax-theme preview before closing.
+                if self.syntax_previewing {
+                    self.apply_syntax_theme();
+                    self.syntax_previewing = false;
+                }
+                self.palette = None;
+            }
             KeyCode::Enter => {
                 let choice = self.palette.as_ref().and_then(|p| p.choose(&self.workspace));
                 self.palette = None;
+                // A previewed syntax theme is committed only if Enter lands on a syntax entry;
+                // otherwise restore the committed theme.
+                let commit = matches!(choice, Some(Choice::Command(Command::SetSyntaxTheme(_))));
+                let was_preview = self.syntax_previewing;
+                self.syntax_previewing = false;
                 match choice {
                     Some(Choice::File(path)) => match self.editor.open(&path) {
                         Ok(()) => {
@@ -2045,21 +2071,27 @@ impl App {
                     Some(Choice::Command(cmd)) => self.run_command(cmd),
                     None => {}
                 }
+                if was_preview && !commit {
+                    self.apply_syntax_theme();
+                }
             }
             KeyCode::Up => {
                 if let Some(p) = &mut self.palette {
                     p.move_up();
                 }
+                self.preview_syntax_under_cursor();
             }
             KeyCode::Down => {
                 if let Some(p) = &mut self.palette {
                     p.move_down();
                 }
+                self.preview_syntax_under_cursor();
             }
             KeyCode::Backspace => {
                 if let Some(p) = &mut self.palette {
                     p.backspace();
                 }
+                self.preview_syntax_under_cursor();
             }
             KeyCode::Left => {
                 if let Some(p) = &mut self.palette {
@@ -2075,14 +2107,52 @@ impl App {
                 if let Some(p) = &mut self.palette {
                     p.insert_char(c);
                 }
+                self.preview_syntax_under_cursor();
             }
             _ => {}
         }
     }
 
-    /// Save theme + solid-background + icon style to state.toml so they persist across launches.
+    /// While the palette is open, live-preview the syntax theme under the cursor; moving off a
+    /// syntax entry restores the committed theme. Selection is only committed on Enter.
+    fn preview_syntax_under_cursor(&mut self) {
+        let choice = self.palette.as_ref().and_then(|p| p.choose(&self.workspace));
+        if let Some(Choice::Command(Command::SetSyntaxTheme(i))) = choice {
+            if let Some(name) = crate::highlight::theme_names().get(i) {
+                crate::highlight::set_named(name);
+                self.editor.rehighlight_all();
+                self.syntax_previewing = true;
+                self.needs_redraw = true;
+            }
+        } else if self.syntax_previewing {
+            self.apply_syntax_theme();
+            self.syntax_previewing = false;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Save theme + solid-background + icon style + syntax theme so they persist across launches.
     fn persist_ui_state(&self) {
-        crate::config::save_state(crate::theme::current().name, self.solid_bg, self.config.icons);
+        crate::config::save_state(
+            crate::theme::current().name,
+            self.solid_bg,
+            self.config.icons,
+            self.syntax_theme.as_deref(),
+        );
+    }
+
+    /// Apply the active syntax theme (gallery override, else the UI theme's default) and recolor
+    /// open buffers. A failed override (e.g. a renamed/removed theme) falls back to the UI theme.
+    fn apply_syntax_theme(&mut self) {
+        let applied = self
+            .syntax_theme
+            .as_deref()
+            .map(crate::highlight::set_named)
+            .unwrap_or(false);
+        if !applied {
+            crate::highlight::set_syntax_theme(crate::theme::current().name);
+        }
+        self.editor.rehighlight_all();
     }
 
     fn run_command(&mut self, cmd: Command) {
@@ -2137,8 +2207,7 @@ impl App {
             }
             Command::CycleTheme => {
                 let name = crate::theme::cycle();
-                crate::highlight::set_syntax_theme(name);
-                self.editor.rehighlight_all();
+                self.apply_syntax_theme();
                 self.status = format!("theme: {name}");
                 self.persist_ui_state();
             }
@@ -2150,9 +2219,22 @@ impl App {
             Command::SetTheme(i) => {
                 crate::theme::set(i);
                 let name = crate::theme::current().name;
-                crate::highlight::set_syntax_theme(name);
-                self.editor.rehighlight_all();
+                self.apply_syntax_theme();
                 self.status = format!("theme: {name}");
+                self.persist_ui_state();
+            }
+            Command::SetSyntaxTheme(i) => {
+                if let Some(name) = crate::highlight::theme_names().get(i).cloned() {
+                    self.syntax_theme = Some(name.clone());
+                    self.apply_syntax_theme();
+                    self.status = format!("syntax: {name}");
+                    self.persist_ui_state();
+                }
+            }
+            Command::SyntaxThemeFollowUi => {
+                self.syntax_theme = None;
+                self.apply_syntax_theme();
+                self.status = "syntax: follows UI theme".into();
                 self.persist_ui_state();
             }
             Command::Help => self.show_help = true,
