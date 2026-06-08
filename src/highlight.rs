@@ -10,32 +10,43 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ropey::Rope;
 use syntect::highlighting::{
-    FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle, Theme, ThemeSet,
+    FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle, Theme,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
-static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
-static THEMES: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+// `bat`'s curated grammar + theme sets (via two-face): ~250 languages and a stack of polished
+// themes, all as plain syntect sets so the rest of the pipeline is unchanged.
+static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(two_face::syntax::extra_newlines);
+static THEMES: Lazy<EmbeddedLazyThemeSet> = Lazy::new(two_face::theme::extra);
 /// The syntect theme used for code colors. Swapped at runtime to track the warren UI theme
 /// (see `set_syntax_theme`) so cycling the theme recolors code, not just the chrome.
-static ACTIVE: Lazy<RwLock<Theme>> =
-    Lazy::new(|| RwLock::new(THEMES.themes["base16-ocean.dark"].clone()));
+static ACTIVE: Lazy<RwLock<Theme>> = Lazy::new(|| RwLock::new(theme_for("Tokyo Night")));
 
-/// Point the highlighter at the bundled syntect theme closest to the given warren UI theme.
-/// syntect's defaults don't ship Tokyo Night / Gruvbox / Catppuccin etc., so we map to the
-/// nearest base16 scheme — dark themes get a dark scheme, Light gets a light one. The editor
-/// must re-highlight open buffers afterward (`Editor::rehighlight_all`) for the change to show.
+/// Pick the bundled theme closest to a warren UI theme. (No native Tokyo Night in the set, so it
+/// maps to TwoDark — a clean, VS-Code-ish dark scheme.)
+fn embedded_for(warren_name: &str) -> EmbeddedThemeName {
+    use EmbeddedThemeName as T;
+    match warren_name {
+        "Tokyo Glow" => T::Nord,
+        "Catppuccin" => T::CatppuccinMocha,
+        "Dracula" => T::Dracula,
+        "Gruvbox" => T::GruvboxDark,
+        "Monochrome" => T::Zenburn,
+        "Light" => T::Github,
+        _ => T::TwoDark, // Tokyo Night + fallback
+    }
+}
+
+fn theme_for(warren_name: &str) -> Theme {
+    THEMES.get(embedded_for(warren_name)).clone()
+}
+
+/// Point the highlighter at the theme matching the given warren UI theme. The editor must
+/// re-highlight open buffers afterward (`Editor::rehighlight_all`) for the change to show.
 pub fn set_syntax_theme(warren_name: &str) {
-    let key = match warren_name {
-        "Catppuccin" | "Dracula" => "base16-mocha.dark",
-        "Gruvbox" => "base16-eighties.dark",
-        "Light" => "InspiredGitHub",
-        _ => "base16-ocean.dark", // Tokyo Night / Tokyo Glow / fallback
-    };
-    if let Some(theme) = THEMES.themes.get(key) {
-        if let Ok(mut active) = ACTIVE.write() {
-            *active = theme.clone();
-        }
+    if let Ok(mut active) = ACTIVE.write() {
+        *active = theme_for(warren_name);
     }
 }
 

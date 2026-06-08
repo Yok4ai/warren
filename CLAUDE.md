@@ -42,9 +42,11 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - `editor.rs` — `Editor` (tabs) + rope-backed `Buffer` (cursor, edits, selection, save).
   Highlight cache is rebuilt lazily (`refresh_highlight`, once per tick after edits).
 - `highlight.rs` — syntect (fancy-regex, no C deps); incremental per-line highlight so line
-  counts stay aligned with cursor coordinates. The syntect theme **tracks the UI theme**
-  (`set_syntax_theme` maps each warren theme to the nearest bundled base16 scheme); cycling the
-  theme calls `Editor::rehighlight_all` so open buffers recolor live.
+  counts stay aligned with cursor coordinates. Grammars + themes come from **`two-face`** (bat's
+  curated set: ~250 languages + polished themes). The syntect theme **tracks the UI theme**
+  (`set_syntax_theme` → `embedded_for` maps each warren theme to the closest `EmbeddedThemeName`,
+  e.g. Tokyo Night→TwoDark, Dracula→Dracula); cycling calls `Editor::rehighlight_all` so open
+  buffers recolor live.
 - `icons.rs` — file-type icons (`IconStyle`: nerd / unicode / none). `nerd` emits Nerd Font
   devicon glyphs + per-language brand colors (the nvim-web-devicons look) and is the default;
   `unicode` is the geometric-symbol fallback for non-Nerd-Font terminals. Used by the explorer,
@@ -74,7 +76,8 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - **Pinned `ratatui 0.29`** (0.30 needs Rust ≥1.86; project MSRV is 1.85). Same for `notify`,
   `ropey 1.x`, and **`git2 0.19` with `--no-default-features`** (0.21 needs Rust ≥1.87; default
   features pull `openssl-sys`, absent here — so push/pull/TLS is disabled). Verify MSRV at `cargo add`.
-- `syntect` uses `default-fancy` (pure-Rust regex) to avoid the oniguruma C build.
+- `syntect` uses `default-fancy` (pure-Rust regex) to avoid the oniguruma C build; **`two-face`**
+  must match with `default-features = false, features = ["syntect-fancy"]` (its default pulls onig).
 - Clipboard = **OSC 52** escape (no clipboard daemon, works over SSH); see `copy_to_clipboard`.
 - Don't paint a full-screen background — the user runs a transparent kitty; let it show through.
 - Comments explain *why*, match surrounding density. Keep `cargo clippy` warning-free.
