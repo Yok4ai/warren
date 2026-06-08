@@ -44,9 +44,10 @@ Single-threaded state, one event funnel, tick-coalesced rendering.
 - `highlight.rs` — syntect (fancy-regex, no C deps); incremental per-line highlight so line
   counts stay aligned with cursor coordinates. Grammars + themes come from **`two-face`** (bat's
   curated set: ~250 languages + polished themes). The syntect theme **tracks the UI theme**
-  (`set_syntax_theme` → `embedded_for` maps each warren theme to the closest `EmbeddedThemeName`,
-  e.g. Tokyo Night→TwoDark, Dracula→Dracula); cycling calls `Editor::rehighlight_all` so open
-  buffers recolor live.
+  (`set_syntax_theme`/`theme_for`: prefer a bundled/user tmTheme by name, else two-face's closest
+  `EmbeddedThemeName`). Real **Tokyo Night** variants (folke's sublime exports) are bundled in
+  `assets/themes/`; users can install any `.tmTheme` by dropping it in `~/.config/warren/themes/`.
+  Cycling the theme calls `Editor::rehighlight_all` so open buffers recolor live.
 - `icons.rs` — file-type icons (`IconStyle`: nerd / unicode / none). `nerd` emits Nerd Font
   devicon glyphs + per-language brand colors (the nvim-web-devicons look) and is the default;
   `unicode` is the geometric-symbol fallback for non-Nerd-Font terminals. Used by the explorer,

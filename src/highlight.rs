@@ -2,6 +2,7 @@
 //! is cached, so an edit only re-highlights from the changed line until the state re-converges
 //! with the previous result. Whole-file re-highlight per keystroke would be far too slow.
 
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::RwLock;
 
@@ -10,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ropey::Rope;
 use syntect::highlighting::{
-    FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle, Theme,
+    FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle, Theme, ThemeSet,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
@@ -19,26 +20,65 @@ use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 // themes, all as plain syntect sets so the rest of the pipeline is unchanged.
 static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(two_face::syntax::extra_newlines);
 static THEMES: Lazy<EmbeddedLazyThemeSet> = Lazy::new(two_face::theme::extra);
+
+// Official Tokyo Night variants (folke/tokyonight.nvim's sublime exports — two-face has no Tokyo
+// Night). Bundled so the default theme is correct out of the box; they share an internal `name`,
+// so we load each under our own key.
+const TN_NIGHT: &str = include_str!("../assets/themes/tokyonight_night.tmTheme");
+const TN_STORM: &str = include_str!("../assets/themes/tokyonight_storm.tmTheme");
+const TN_MOON: &str = include_str!("../assets/themes/tokyonight_moon.tmTheme");
+const TN_DAY: &str = include_str!("../assets/themes/tokyonight_day.tmTheme");
+
+/// Bundled tmThemes plus any the user dropped in `~/.config/warren/themes/*.tmTheme` — the
+/// "install a theme" path: grab an official Dracula/Catppuccin/etc. `.tmTheme` (or a converted
+/// VS Code theme) and it becomes selectable by its own name.
+static EXTRA: Lazy<ThemeSet> = Lazy::new(|| {
+    let mut ts = ThemeSet::new();
+    for (name, data) in [
+        ("Tokyo Night", TN_NIGHT),
+        ("Tokyo Storm", TN_STORM),
+        ("Tokyo Moon", TN_MOON),
+        ("Tokyo Day", TN_DAY),
+    ] {
+        if let Ok(t) = ThemeSet::load_from_reader(&mut Cursor::new(data.as_bytes())) {
+            ts.themes.insert(name.to_string(), t);
+        }
+    }
+    if let Some(dir) = dirs::config_dir().map(|d| d.join("warren").join("themes")) {
+        let _ = std::fs::create_dir_all(&dir); // so the folder exists for the user to drop themes in
+        let _ = ts.add_from_folder(&dir); // best-effort; each theme keyed by its own `name`
+    }
+    ts
+});
+
 /// The syntect theme used for code colors. Swapped at runtime to track the warren UI theme
 /// (see `set_syntax_theme`) so cycling the theme recolors code, not just the chrome.
 static ACTIVE: Lazy<RwLock<Theme>> = Lazy::new(|| RwLock::new(theme_for("Tokyo Night")));
 
-/// Pick the bundled theme closest to a warren UI theme. (No native Tokyo Night in the set, so it
-/// maps to TwoDark — a clean, VS-Code-ish dark scheme.)
+/// two-face's closest embedded theme for warren themes that have no bundled/user tmTheme.
 fn embedded_for(warren_name: &str) -> EmbeddedThemeName {
     use EmbeddedThemeName as T;
     match warren_name {
-        "Tokyo Glow" => T::Nord,
         "Catppuccin" => T::CatppuccinMocha,
         "Dracula" => T::Dracula,
         "Gruvbox" => T::GruvboxDark,
         "Monochrome" => T::Zenburn,
-        "Light" => T::Github,
-        _ => T::TwoDark, // Tokyo Night + fallback
+        _ => T::TwoDark,
     }
 }
 
 fn theme_for(warren_name: &str) -> Theme {
+    // Prefer a bundled/user tmTheme — by a mapped name, then by the UI theme's own name (so a
+    // user can drop e.g. "Dracula.tmTheme" to override) — else two-face's closest embedded theme.
+    let mapped = match warren_name {
+        "Tokyo Night" => "Tokyo Night",
+        "Tokyo Glow" => "Tokyo Storm",
+        "Light" => "Tokyo Day",
+        _ => warren_name,
+    };
+    if let Some(t) = EXTRA.themes.get(mapped).or_else(|| EXTRA.themes.get(warren_name)) {
+        return t.clone();
+    }
     THEMES.get(embedded_for(warren_name)).clone()
 }
 
